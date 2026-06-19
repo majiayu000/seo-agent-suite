@@ -1,0 +1,40 @@
+{
+  "name": "seo-agent-suite",
+  "version": "0.1.0",
+  "description": "Evidence-backed SEO and discoverability audit skills for open-source projects, docs sites, package registries, and GEO/AEO workflows.",
+  "author": {
+    "name": "majiayu000",
+    "email": "1835304752@qq.com",
+    "url": "https://github.com/majiayu000"
+  },
+  "repository": "https://github.com/majiayu000/seo-agent-suite",
+  "license": "MIT",
+  "keywords": [
+    "seo",
+    "github-seo",
+    "technical-seo",
+    "geo",
+    "aeo",
+    "codex-plugin",
+    "shipwise"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "SEO Agent Suite",
+    "shortDescription": "Audit repo, package, site, and GEO SEO evidence.",
+    "longDescription": "SEO Agent Suite turns Shipwise discoverability guidance into executable Codex workflows for repository metadata, package registries, technical site SEO, content/GEO planning, and provider selection. It keeps local dry-audits separate from paid or authenticated data sources.",
+    "developerName": "majiayu000",
+    "category": "Productivity",
+    "capabilities": [
+      "Write",
+      "Network",
+      "Analysis"
+    ],
+    "defaultPrompt": [
+      "Audit this repo's SEO and discoverability.",
+      "Run a technical SEO audit for this docs site.",
+      "Create a GEO content brief with evidence boundaries."
+    ],
+    "brandColor": "#0E8A16"
+  }
+}
