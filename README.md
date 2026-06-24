@@ -1,5 +1,8 @@
 # SEO Agent Suite
 
+[![Check](https://github.com/majiayu000/seo-agent-suite/actions/workflows/check.yml/badge.svg)](https://github.com/majiayu000/seo-agent-suite/actions/workflows/check.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Codex plugin for evidence-backed SEO and discoverability audits.
 
 This repository is the execution layer for Shipwise-style discoverability work. Shipwise remains the launch/discoverability planning system; this plugin provides reusable skills and scripts that collect evidence and turn it into repo, package, site, and content SEO actions.
@@ -20,6 +23,31 @@ seo-agent-suite
 ```
 
 Use Shipwise to decide launch strategy, platform fit, messaging, and project records. Use SEO Agent Suite to run audits, collect public-surface evidence, and generate SEO issues or reports.
+
+## Quick Start
+
+Run the local validation checks:
+
+```bash
+python3 -m py_compile scripts/*.py
+python3 tests/test_structure.py
+```
+
+Run a repository baseline audit:
+
+```bash
+python3 scripts/repo_seo_baseline.py --root . --json
+```
+
+Run a basic public-page metadata audit:
+
+```bash
+python3 scripts/site_meta_audit.py https://example.com/ --json
+```
+
+The plugin manifest lives at [.codex-plugin/plugin.json](.codex-plugin/plugin.json).
+Skills live under [skills/](skills/), and reference material lives under
+[references/](references/).
 
 ## Skills
 
@@ -43,6 +71,10 @@ The scripts are local dry-audit tools. They do not require API keys and should n
 python3 -m py_compile scripts/*.py
 python3 tests/test_structure.py
 ```
+
+## Release Notes
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## Boundaries
 
