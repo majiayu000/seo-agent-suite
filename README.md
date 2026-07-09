@@ -31,12 +31,19 @@ Run the local validation checks:
 ```bash
 python3 -m py_compile scripts/*.py
 python3 tests/test_structure.py
+python3 tests/test_scripts.py
 ```
 
 Run a repository baseline audit:
 
 ```bash
 python3 scripts/repo_seo_baseline.py --root . --json
+```
+
+Run the same audit with a Shipwise project record:
+
+```bash
+python3 scripts/repo_seo_baseline.py --root /path/to/repo --project-yaml /path/to/project.yaml --json
 ```
 
 Run a basic public-page metadata audit:
@@ -70,6 +77,7 @@ The scripts are local dry-audit tools. They do not require API keys and should n
 ```bash
 python3 -m py_compile scripts/*.py
 python3 tests/test_structure.py
+python3 tests/test_scripts.py
 ```
 
 ## Release Notes
@@ -82,3 +90,4 @@ See [CHANGELOG.md](CHANGELOG.md).
 - Do not claim Google indexing or rankings from a successful crawl alone.
 - Do not present optional MCP providers as installed unless the current environment proves it.
 - Do not automate posting or publishing. This plugin audits and prepares evidence; publishing still requires explicit user instruction.
+- The declared `Write` capability is for local report and issue-draft files only, never for remote publishing.
