@@ -5,7 +5,7 @@ description: Choose and document SEO data sources and MCP/provider boundaries fo
 
 # SEO Data Sources
 
-Use this skill before relying on external SEO data. Read `../../references/data-sources.md` first.
+Use this skill before relying on external SEO data. Read `references/data-sources.md` (resolved from the suite/plugin root) first.
 
 ## Workflow
 
@@ -24,6 +24,18 @@ Use this skill before relying on external SEO data. Read `../../references/data-
 - DataForSEO: keyword, SERP, and competitor data via API.
 - SE Ranking: packaged SEO/GEO workflows and share-of-voice style reporting.
 - Ahrefs: backlinks, content gap, competing pages, and authority estimates.
+
+## Output
+
+A short data-source decision record: the claim, the chosen source, why the
+smaller sources were insufficient, access status (installed / needs auth /
+unavailable), and cost boundary. Attach it to the audit report or issue.
+
+## Failure Handling
+
+- If no available source can prove the claim, report it as `Hypothesis` with
+  the missing provider named as a blocker. Do not downgrade silently to a
+  weaker source without recording the substitution.
 
 ## Rules
 
