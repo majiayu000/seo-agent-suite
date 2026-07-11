@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
+import re
 import shutil
+import socket
 import subprocess
 import sys
 import urllib.error
@@ -43,11 +46,16 @@ def run_cmd(args: list[str], cwd: Path | None = None, timeout: int = 20) -> dict
     }
 
 
-def read_json(path: Path) -> dict | None:
+def read_json(path: Path) -> tuple[dict | None, dict | None]:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        return None, {"status": "error", "path": str(path), "reason": str(exc)}
+    except json.JSONDecodeError as exc:
+        return None, {"status": "error", "path": str(path), "reason": f"invalid JSON: {exc}"}
+    if not isinstance(data, dict):
+        return None, {"status": "error", "path": str(path), "reason": "JSON root must be an object"}
+    return data, None
 
 
 def read_toml(path: Path) -> tuple[dict | None, dict | None]:
@@ -61,13 +69,48 @@ def read_toml(path: Path) -> tuple[dict | None, dict | None]:
         return None, {"status": "error", "path": str(path), "reason": f"invalid TOML: {exc}"}
 
 
-def http_check(url: str, timeout: int = 15) -> dict:
+def validate_public_http_url(url: str) -> None:
     parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return {"status": "error", "url": url, "reason": "unsupported URL scheme"}
-    request = urllib.request.Request(url, method="GET", headers={"User-Agent": "github-repo-seo-skill/1.0"})
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("unsupported URL scheme")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("URL credentials are not allowed")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        raise ValueError("invalid URL port") from exc
+    try:
+        addresses = {
+            item[4][0].split("%", 1)[0]
+            for item in socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+        }
+    except socket.gaierror as exc:
+        raise ValueError(f"hostname resolution failed: {exc}") from exc
+    if not addresses:
+        raise ValueError("hostname resolution returned no addresses")
+    blocked = sorted(address for address in addresses if not ipaddress.ip_address(address).is_global)
+    if blocked:
+        raise ValueError("URL resolves to a non-public address")
+
+
+class PublicOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        try:
+            validate_public_http_url(newurl)
+        except ValueError as exc:
+            raise urllib.error.URLError(f"redirect blocked: {exc}") from exc
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def http_check(url: str, timeout: int = 15) -> dict:
+    try:
+        validate_public_http_url(url)
+    except ValueError as exc:
+        return {"status": "error", "url": url, "reason": str(exc)}
+    request = urllib.request.Request(url, method="GET", headers={"User-Agent": "github-repo-seo-skill/1.0"})
+    opener = urllib.request.build_opener(PublicOnlyRedirectHandler())
+    try:
+        with opener.open(request, timeout=timeout) as response:
             body = response.read(2048)
             return {
                 "status": "ok",
@@ -132,8 +175,9 @@ def collect_manifests(root: Path) -> dict:
     for path in sorted(root.glob("**/package.json")):
         if "node_modules" in path.parts:
             continue
-        data = read_json(path)
-        if not data:
+        data, json_error = read_json(path)
+        if json_error:
+            manifests["errors"].append({**json_error, "path": str(path.relative_to(root))})
             continue
         manifests["npm"].append(
             {
@@ -311,18 +355,28 @@ def evaluate_shipwise_project(root: Path, project_yaml: Path) -> dict:
 
     invalid_topics = [
         item for item in topics
-        if not isinstance(item, str) or len(item) > 50 or item.lower() != item or " " in item
+        if not isinstance(item, str) or re.fullmatch(r"[a-z0-9-]{1,50}", item) is None
     ]
+    duplicate_topics = sorted({item for item in topics if topics.count(item) > 1})
     repeated_primary = (
         description.lower().count(primary_keyword.lower()) > 1 if primary_keyword and description else False
+    )
+    primary_in_description = bool(
+        primary_keyword and description and primary_keyword.casefold() in description.casefold()
     )
 
     checks = {
         "description": check_item(bool(description), description, "missing discoverability.description"),
         "primary_keyword": check_item(bool(primary_keyword), primary_keyword, "missing discoverability.primary_keyword"),
+        "primary_keyword_in_description": check_item(
+            primary_in_description,
+            {"primary_keyword": primary_keyword, "description": description},
+            "primary keyword must appear in discoverability.description",
+        ),
         "keywords": check_item(bool(keywords), keywords, "missing discoverability.keywords"),
         "topics_count": check_item(5 <= len(topics) <= 20, len(topics), "topics must contain 5 to 20 entries"),
         "topics_format": check_item(not invalid_topics, invalid_topics, "topics must be lowercase hyphenated GitHub topic slugs"),
+        "topics_unique": check_item(not duplicate_topics, duplicate_topics, "topics must not contain duplicates"),
         "homepage_url": check_item(bool(normalized_homepage), normalized_homepage, "missing discoverability.homepage_url"),
         "social_image_set": check_item(
             discoverability.get("social_image_set") is True,
@@ -332,10 +386,20 @@ def evaluate_shipwise_project(root: Path, project_yaml: Path) -> dict:
         "keyword_stuffing": check_item(not repeated_primary, description, "primary keyword repeated too often in description"),
         "readme": check_item(community_files["readme"], community_files["readme"], "README missing"),
         "license": check_item(community_files["license"], community_files["license"], "LICENSE missing"),
+        "contributing": check_item(
+            community_files["contributing"], community_files["contributing"], "CONTRIBUTING missing"
+        ),
+        "code_of_conduct": check_item(
+            community_files["code_of_conduct"], community_files["code_of_conduct"], "CODE_OF_CONDUCT missing"
+        ),
+        "security": check_item(community_files["security"], community_files["security"], "SECURITY missing"),
+        "issue_templates": check_item(
+            community_files["issue_templates"], community_files["issue_templates"], "issue templates missing"
+        ),
         "support_path": check_item(
-            community_files["issue_templates"] or community_files["contributing"],
+            community_files["issue_templates"] and community_files["contributing"],
             community_files,
-            "missing issue templates or CONTRIBUTING support path",
+            "support path requires both issue templates and CONTRIBUTING",
         ),
     }
 
@@ -353,9 +417,14 @@ def collect_errors(evidence: dict) -> list[dict]:
         errors.append({"surface": "manifest", **item})
 
     for homepage, checks in evidence.get("site", {}).items():
-        homepage_check = checks.get("homepage", {})
-        if homepage_check.get("status") == "error":
-            errors.append({"surface": "site", "url": homepage, "reason": homepage_check.get("reason", "homepage check failed")})
+        for resource, resource_check in checks.items():
+            if resource_check.get("status") == "error":
+                errors.append({
+                    "surface": "site",
+                    "resource": resource,
+                    "url": resource_check.get("url", homepage),
+                    "reason": resource_check.get("reason", f"{resource} check failed"),
+                })
 
     for name, item in evidence.get("shipwise", {}).get("checks", {}).items():
         if item.get("status") == "error":

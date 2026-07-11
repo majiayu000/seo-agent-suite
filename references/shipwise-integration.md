@@ -40,8 +40,14 @@ python3 scripts/repo_seo_baseline.py \
   --json
 ```
 
-The script validates the `discoverability:` block for description, primary
-keyword, keyword list, GitHub topic count/format, homepage URL, social preview
-state, and local community/support files. Failures are emitted in the top-level
-`errors` array and return a non-zero exit code, so CI and launch-readiness gates
-can fail closed instead of silently falling back to incomplete data.
+The script validates the declared `discoverability:` block plus local
+community-file evidence: description/primary-keyword alignment, keyword list,
+GitHub topic count/format/uniqueness, homepage URL, social preview state,
+README, license, contributing guide, code of conduct, security policy, and
+issue templates. Failures are emitted in the top-level `errors` array and
+return a non-zero exit code, so CI and launch-readiness gates can fail closed.
+
+This is a local contract gate, not proof of the complete Shipwise checklist. It
+does not prove live GitHub metadata, release state, indexing, rankings, or
+search visibility; collect those surfaces separately with their current data
+sources.
