@@ -59,6 +59,9 @@ class MetaParser(HTMLParser):
 
 
 def fetch(url: str, timeout: int = 20) -> dict:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return {"status": "error", "url": url, "reason": "unsupported URL scheme"}
     request = urllib.request.Request(url, headers={"User-Agent": "github-repo-seo-skill/1.0"})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -114,8 +117,25 @@ def check_candidates(base_url: str, filename: str) -> list[dict]:
     results = []
     for candidate in resource_candidates(base_url, filename):
         item = fetch(candidate)
-        results.append({key: value for key, value in item.items() if key != "body"})
+        present, reason = resource_present(item, filename)
+        public_item = {key: value for key, value in item.items() if key != "body"}
+        public_item["present"] = present
+        if reason:
+            public_item["reason"] = reason
+        results.append(public_item)
     return results
+
+
+def resource_present(item: dict, filename: str) -> tuple[bool, str]:
+    if item.get("status") != "ok" or item.get("http_status") != 200:
+        return False, item.get("reason", "not HTTP 200")
+    body = str(item.get("body") or "").strip()
+    content_type = str(item.get("content_type") or "").lower()
+    if "<html" in body[:500].lower() or "text/html" in content_type:
+        return False, "looks like HTML, not a crawl resource"
+    if filename == "sitemap.xml" and "<urlset" not in body[:1000] and "<sitemapindex" not in body[:1000]:
+        return False, "missing sitemap XML root"
+    return True, ""
 
 
 def audit(url: str) -> dict:
@@ -146,8 +166,8 @@ def audit(url: str) -> dict:
                 "has_canonical": bool(first_link(parser, "canonical")),
                 "has_og_title": bool(all_meta_prefix(parser, "property", "og:").get("og:title")),
                 "has_json_ld": parser.json_ld_count > 0,
-                "has_robots_txt": any(item.get("http_status") == 200 for item in robots),
-                "has_sitemap_xml": any(item.get("http_status") == 200 for item in sitemap),
+                "has_robots_txt": any(item.get("present") for item in robots),
+                "has_sitemap_xml": any(item.get("present") for item in sitemap),
                 "robots_txt": robots,
                 "sitemap_xml": sitemap,
             },
@@ -161,6 +181,9 @@ def main() -> int:
     parser.add_argument("url", help="Public URL to inspect.")
     parser.add_argument("--json", action="store_true", help="Emit JSON output.")
     args = parser.parse_args()
+    parsed = urllib.parse.urlparse(args.url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        parser.error(f"url must be an http(s) URL: {args.url}")
 
     result = audit(args.url)
     if args.json:
@@ -171,7 +194,7 @@ def main() -> int:
         print(f"title: {result.get('title')}")
         print(f"description: {result.get('meta_description')}")
         print(f"canonical: {result.get('canonical')}")
-    return 0
+    return 0 if result.get("page", {}).get("status") == "ok" else 1
 
 
 if __name__ == "__main__":

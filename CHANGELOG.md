@@ -2,7 +2,14 @@
 
 ## Unreleased
 
-- None yet.
+- Fixed local audit scripts to return non-zero status for invalid inputs,
+  unreachable audited pages, manifest parser failures, and Shipwise
+  discoverability gate failures.
+- Added `--project-yaml` handoff support for Shipwise `discoverability:` fields.
+- Added script behavior tests for URL validation, TOML parser errors,
+  soft-404 resource detection, and Shipwise gate failures.
+- Clarified skill command paths so audits run from the suite/plugin root while
+  `--root` points at the target repository.
 
 ## 0.1.0 - 2026-06-25
 

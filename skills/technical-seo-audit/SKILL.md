@@ -10,14 +10,15 @@ Audit crawlability and page-level technical SEO. Prefer deterministic evidence b
 ## Workflow
 
 1. Identify the target URL and scope: single page, docs site, sitemap URLs, or selected landing pages.
-2. Run the local page audit first:
+2. Run the local page audit first from the SEO Agent Suite repository or
+   installed plugin root:
 
 ```bash
-python3 ../../scripts/site_meta_audit.py <url> --json
+python3 scripts/site_meta_audit.py <url> --json
 ```
 
 3. For repository-backed sites, also run `github-repo-seo` baseline collection.
-4. For multi-page or JavaScript-rendered sites, read `../../references/data-sources.md` and choose Firecrawl, Playwright, or Lighthouse based on the proof needed.
+4. For multi-page or JavaScript-rendered sites, read `references/data-sources.md` and choose Firecrawl, Playwright, or Lighthouse based on the proof needed.
 5. Classify every finding as `Confirmed`, `Likely`, or `Hypothesis`.
 
 ## Inspect
@@ -32,7 +33,7 @@ python3 ../../scripts/site_meta_audit.py <url> --json
 
 ## Output
 
-Use `../../references/report-template.md`. Keep a concise action plan with owner-ready tasks or GitHub issues.
+Use `references/report-template.md`. Keep a concise action plan with owner-ready tasks or GitHub issues.
 
 ## Rules
 
