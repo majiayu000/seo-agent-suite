@@ -209,23 +209,37 @@ discoverability:
         ]
         with (
             mock.patch.object(module.socket, "getaddrinfo", return_value=private_answer),
-            mock.patch.object(module.urllib.request, "build_opener") as build_opener,
+            mock.patch.object(module, "connect_endpoint") as connect_endpoint,
         ):
             result = module.http_check("http://audit-target.example")
 
         self.assertEqual(result["status"], "error")
         self.assertIn("non-public", result["reason"])
-        build_opener.assert_not_called()
+        connect_endpoint.assert_not_called()
 
-        handler = module.PublicOnlyRedirectHandler()
-        request = module.urllib.request.Request("https://public.example")
-        with (
-            mock.patch.object(module.socket, "getaddrinfo", return_value=private_answer),
-            self.assertRaises(module.urllib.error.URLError),
-        ):
-            handler.redirect_request(
-                request, None, 302, "Found", {}, "http://169.254.169.254/latest/meta-data"
-            )
+        public_answer = [
+            (module.socket.AF_INET, module.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))
+        ]
+        client, server = module.socket.socketpair()
+        server.sendall(
+            b"HTTP/1.1 302 Found\r\nContent-Length: 0\r\n"
+            b"Location: http://metadata.example/latest\r\n\r\n"
+        )
+        try:
+            with (
+                mock.patch.object(
+                    module.socket, "getaddrinfo", side_effect=[public_answer, private_answer]
+                ) as getaddrinfo,
+                mock.patch.object(module, "connect_endpoint", return_value=client) as connect_endpoint,
+            ):
+                result = module.http_check("http://public.example/start")
+        finally:
+            server.close()
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("redirect blocked", result["reason"])
+        self.assertEqual(getaddrinfo.call_count, 2)
+        connect_endpoint.assert_called_once_with(public_answer[0], 15)
 
     def test_public_url_validation_covers_credentials_ports_dns_and_redirects(self) -> None:
         module = load_script("repo_seo_baseline.py")
@@ -233,18 +247,15 @@ discoverability:
             (module.socket.AF_INET, module.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
         ]
         with mock.patch.object(module.socket, "getaddrinfo", return_value=public_answer):
-            module.validate_public_http_url("https://example.com")
-            handler = module.PublicOnlyRedirectHandler()
-            request = module.urllib.request.Request("https://example.com/start")
-            redirected = handler.redirect_request(
-                request, None, 302, "Found", {}, "https://example.com/final"
-            )
-        self.assertEqual(redirected.full_url, "https://example.com/final")
+            parsed, endpoints = module.validate_public_http_url("https://example.com")
+        self.assertEqual(parsed.hostname, "example.com")
+        self.assertEqual(endpoints, public_answer)
 
         invalid_urls = [
             "file:///tmp/local",
             "https://user:pass@example.com/",
             "https://example.com:not-a-port/",
+            "http://example.com:0/",
         ]
         for url in invalid_urls:
             with self.subTest(url=url), self.assertRaises(ValueError):
@@ -259,55 +270,130 @@ discoverability:
         ):
             module.validate_public_http_url("https://empty.example")
 
-    def test_http_check_uses_public_only_opener_and_surfaces_transport_errors(self) -> None:
+    def test_request_uses_the_validated_endpoint_without_resolving_again(self) -> None:
         module = load_script("repo_seo_baseline.py")
-
-        class Response:
-            status = 200
-            headers = {"content-type": "text/html"}
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def read(self, _size):
-                return b"ok"
-
-            def geturl(self):
-                return "https://example.com/final"
-
-        class Opener:
-            def __init__(self, result):
-                self.result = result
-
-            def open(self, _request, timeout):
-                if isinstance(self.result, Exception):
-                    raise self.result
-                self.timeout = timeout
-                return self.result
-
         public_answer = [
-            (module.socket.AF_INET, module.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+            (module.socket.AF_INET, module.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))
         ]
+        client, server = module.socket.socketpair()
+        server.sendall(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\n\r\nok"
+        )
+        try:
+            with (
+                mock.patch.object(
+                    module.socket, "getaddrinfo", return_value=public_answer
+                ) as getaddrinfo,
+                mock.patch.object(module, "connect_endpoint", return_value=client) as connect_endpoint,
+            ):
+                response = module.request_public_url_once("http://rebind.example/path?q=1", 9)
+        finally:
+            server.close()
+
+        self.assertEqual(response["sample_bytes"], 2)
+        self.assertEqual(response["content_type"], "text/plain")
+        getaddrinfo.assert_called_once()
+        connect_endpoint.assert_called_once_with(public_answer[0], 9)
+
+    def test_endpoint_connector_closes_failed_sockets(self) -> None:
+        module = load_script("repo_seo_baseline.py")
+        endpoint = (module.socket.AF_INET, module.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))
+        sock = mock.Mock()
+        with mock.patch.object(module.socket, "socket", return_value=sock):
+            connected = module.connect_endpoint(endpoint, 4)
+        self.assertIs(connected, sock)
+        sock.settimeout.assert_called_once_with(4)
+        sock.connect.assert_called_once_with(endpoint[4])
+
+        failed_sock = mock.Mock()
+        failed_sock.connect.side_effect = OSError("denied")
+        with (
+            mock.patch.object(module.socket, "socket", return_value=failed_sock),
+            self.assertRaisesRegex(OSError, "denied"),
+        ):
+            module.connect_endpoint(endpoint, 4)
+        failed_sock.close.assert_called_once()
+
+    def test_https_connection_preserves_hostname_for_sni_and_certificate_checks(self) -> None:
+        module = load_script("repo_seo_baseline.py")
+        endpoint = (module.socket.AF_INET, module.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+        context = mock.Mock()
+        raw_socket = mock.Mock()
+        wrapped_socket = mock.Mock()
+        context.wrap_socket.return_value = wrapped_socket
+
+        with (
+            mock.patch.object(module.ssl, "create_default_context", return_value=context),
+            mock.patch.object(module, "connect_endpoint", return_value=raw_socket),
+        ):
+            connection = module.PinnedHTTPSConnection("example.com", 443, endpoint, 7)
+            connection.connect()
+
+        context.set_alpn_protocols.assert_called_once_with(["http/1.1"])
+        context.wrap_socket.assert_called_once_with(raw_socket, server_hostname="example.com")
+        self.assertIs(connection.sock, wrapped_socket)
+
+        context.wrap_socket.side_effect = module.ssl.SSLError("certificate failed")
+        with (
+            mock.patch.object(module.ssl, "create_default_context", return_value=context),
+            mock.patch.object(module, "connect_endpoint", return_value=raw_socket),
+            self.assertRaisesRegex(module.ssl.SSLError, "certificate failed"),
+        ):
+            module.PinnedHTTPSConnection("example.com", 443, endpoint, 7).connect()
+        raw_socket.close.assert_called_once()
+
+    def test_request_reports_failure_when_all_pinned_endpoints_fail(self) -> None:
+        module = load_script("repo_seo_baseline.py")
+        public_answer = [
+            (module.socket.AF_INET, module.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))
+        ]
+        connection = mock.Mock()
+        connection.request.side_effect = TimeoutError("timed out")
         with (
             mock.patch.object(module.socket, "getaddrinfo", return_value=public_answer),
-            mock.patch.object(module.urllib.request, "build_opener", return_value=Opener(Response())),
+            mock.patch.object(module, "PinnedHTTPConnection", return_value=connection),
+            self.assertRaisesRegex(OSError, "timed out"),
         ):
-            success = module.http_check("https://example.com")
-        self.assertEqual(success["status"], "ok")
-        self.assertEqual(success["sample_bytes"], 2)
+            module.request_public_url_once("http://example.com", 3)
+        connection.close.assert_called_once()
 
-        failures = [module.urllib.error.URLError("offline"), TimeoutError()]
-        for failure in failures:
+    def test_http_check_surfaces_status_redirect_and_transport_errors(self) -> None:
+        module = load_script("repo_seo_baseline.py")
+        cases = [
+            ({"http_status": 404, "location": None, "content_type": None, "sample_bytes": 0}, "HTTP status 404"),
+            ({"http_status": 302, "location": None, "content_type": None, "sample_bytes": 0}, "missing Location"),
+        ]
+        for response, expected_reason in cases:
             with (
-                self.subTest(failure=type(failure).__name__),
-                mock.patch.object(module.socket, "getaddrinfo", return_value=public_answer),
-                mock.patch.object(module.urllib.request, "build_opener", return_value=Opener(failure)),
+                self.subTest(expected_reason=expected_reason),
+                mock.patch.object(module, "request_public_url_once", return_value=response),
             ):
                 result = module.http_check("https://example.com")
             self.assertEqual(result["status"], "error")
+            self.assertIn(expected_reason, result["reason"])
+
+        with mock.patch.object(module, "request_public_url_once", side_effect=OSError("offline")):
+            result = module.http_check("https://example.com")
+        self.assertEqual(result["status"], "error")
+        self.assertIn("offline", result["reason"])
+
+        redirect = {"http_status": 302, "location": "/again", "content_type": None, "sample_bytes": 0}
+        with mock.patch.object(module, "request_public_url_once", return_value=redirect) as request_once:
+            result = module.http_check("https://example.com")
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["reason"], "too many redirects")
+        self.assertEqual(request_once.call_count, 6)
+
+        success_response = {
+            "http_status": 200,
+            "location": None,
+            "content_type": "text/html",
+            "sample_bytes": 2,
+        }
+        with mock.patch.object(module, "request_public_url_once", return_value=success_response):
+            result = module.http_check("https://example.com")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["sample_bytes"], 2)
 
     def test_package_json_root_must_be_an_object(self) -> None:
         module = load_script("repo_seo_baseline.py")
