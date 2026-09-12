@@ -17,20 +17,14 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import public_http
-from public_http import (  # noqa: E402  - scripts/ is added to sys.path above
+from public_http import (  # noqa: E402
     PinnedHTTPConnection,
     PinnedHTTPSConnection,
-    ResolvedEndpoint,
-    SocketAddress,
     connect_endpoint,
     http_check,
     request_public_url_once,
     validate_public_http_url,
 )
-
-# Re-export modules used by tests that patch socket/ssl on this script.
-socket = public_http.socket
-ssl = public_http.ssl
 
 try:
     import tomllib
