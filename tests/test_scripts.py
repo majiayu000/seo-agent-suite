@@ -500,15 +500,22 @@ discoverability:
         with (
             mock.patch.object(module.socket, "getaddrinfo", return_value=public_answer),
             mock.patch.object(module, "select_proxy", return_value=proxy),
-            mock.patch.object(module.http.client, "HTTPConnection", return_value=connection) as http_conn,
+            mock.patch.object(module, "ProxyPinnedHTTPConnection", return_value=connection) as proxy_http,
             mock.patch.object(module, "PinnedHTTPConnection") as pinned,
         ):
             result = module.request_public_url_once("http://example.com/page;variant?q=1", 5)
-        http_conn.assert_called_once_with("proxy.example", 8080, timeout=5)
+        proxy_http.assert_called_once_with(
+            "proxy.example",
+            8080,
+            endpoint_ip="93.184.216.34",
+            target_port=80,
+            timeout=5,
+            tunnel_headers=None,
+        )
         pinned.assert_not_called()
         connection.request.assert_called_once_with(
             "GET",
-            "http://93.184.216.34:80/page;variant?q=1",
+            "/page;variant?q=1",
             headers={"User-Agent": "github-repo-seo-skill/1.0", "Host": "example.com"},
         )
         self.assertEqual(result["http_status"], 200)
@@ -587,6 +594,73 @@ discoverability:
         self.assertEqual(proxy.scheme, "http")
         self.assertEqual(proxy.hostname, "proxy.example")
         self.assertEqual(proxy.port, 8080)
+
+    def test_select_proxy_does_not_fall_http_proxy_onto_https(self) -> None:
+        module = load_script("public_http.py")
+        parsed = module.urllib.parse.urlparse("https://example.com")
+        with mock.patch.object(
+            module.urllib.request,
+            "getproxies",
+            return_value={"http": "http://proxy.example:8080"},
+        ), mock.patch.object(module.urllib.request, "proxy_bypass", return_value=False):
+            self.assertIsNone(module.select_proxy(parsed))
+
+    def test_select_proxy_uses_all_proxy_for_https(self) -> None:
+        module = load_script("public_http.py")
+        parsed = module.urllib.parse.urlparse("https://example.com")
+        with mock.patch.object(
+            module.urllib.request,
+            "getproxies",
+            return_value={"all": "http://proxy.example:8080"},
+        ), mock.patch.object(module.urllib.request, "proxy_bypass", return_value=False):
+            proxy = module.select_proxy(parsed)
+        self.assertIsNotNone(proxy)
+        assert proxy is not None
+        self.assertEqual(proxy.hostname, "proxy.example")
+
+    def test_proxy_bypass_host_brackets_ipv6(self) -> None:
+        module = load_script("public_http.py")
+        parsed = module.urllib.parse.urlparse("https://[2606:4700:4700::1111]:8443/")
+        self.assertEqual(
+            module._proxy_bypass_host(parsed),
+            "[2606:4700:4700::1111]:8443",
+        )
+        with mock.patch.object(
+            module.urllib.request,
+            "proxy_bypass",
+            return_value=True,
+        ) as bypass, mock.patch.object(module.urllib.request, "getproxies") as getproxies:
+            self.assertIsNone(module.select_proxy(parsed))
+        bypass.assert_called_once_with("[2606:4700:4700::1111]:8443")
+        getproxies.assert_not_called()
+
+    def test_redact_url_tolerates_malformed_ports(self) -> None:
+        module = load_script("public_http.py")
+        self.assertEqual(
+            module.redact_url("https://user:secret@example.com:notaport/"),
+            "https://example.com:notaport/",
+        )
+
+    def test_follow_public_http_redacts_malformed_port_redirect_without_traceback(self) -> None:
+        module = load_script("public_http.py")
+        redirect = {
+            "http_status": 302,
+            "location": "https://user:secret@example.com:notaport/",
+            "content_type": None,
+            "sample_bytes": 0,
+            "body": b"",
+        }
+        with mock.patch.object(
+            module,
+            "request_public_url_once",
+            side_effect=[redirect, ValueError("invalid URL port")],
+        ):
+            result = module.follow_public_http("https://example.com/start")
+        self.assertEqual(result["status"], "error")
+        self.assertIn("redirect blocked", result["reason"])
+        self.assertEqual(result["url"], "https://example.com:notaport/")
+        self.assertNotIn("user", result["url"])
+        self.assertNotIn("secret", result["url"])
 
     def test_http_host_header_encodes_idna_and_brackets_ipv6(self) -> None:
         module = load_script("public_http.py")

@@ -128,7 +128,15 @@ def redact_url(url: str) -> str:
             host = f"[{host}]"
     except ValueError:
         pass
-    netloc = host if parsed.port is None else f"{host}:{parsed.port}"
+    try:
+        port = parsed.port
+    except ValueError:
+        # Malformed ports raise on .port access; strip userinfo from the raw netloc instead.
+        netloc = parsed.netloc.rsplit("@", 1)[-1] if "@" in parsed.netloc else parsed.netloc
+        return urllib.parse.urlunparse(
+            (parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment)
+        )
+    netloc = host if port is None else f"{host}:{port}"
     return urllib.parse.urlunparse(
         (parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment)
     )
@@ -145,19 +153,38 @@ def _parse_proxy_setting(raw: str) -> urllib.parse.ParseResult:
     return proxy
 
 
+def _proxy_bypass_host(parsed: urllib.parse.ParseResult) -> str:
+    """Format a host key for proxy_bypass, keeping IPv6 authorities bracketed."""
+    host = parsed.hostname
+    if host is None:
+        return ""
+    bare = host.split("%", 1)[0]
+    try:
+        if ipaddress.ip_address(bare).version == 6 and not host.startswith("["):
+            host = f"[{bare}]"
+    except ValueError:
+        pass
+    try:
+        port = parsed.port
+    except ValueError:
+        return host
+    return host if port is None else f"{host}:{port}"
+
+
 def select_proxy(parsed: urllib.parse.ParseResult) -> urllib.parse.ParseResult | None:
     """Return an HTTP(S) proxy for the target, honoring env/system proxy settings."""
     host = parsed.hostname
     if host is None:
         return None
-    bypass_host = host if parsed.port is None else f"{host}:{parsed.port}"
+    bypass_host = _proxy_bypass_host(parsed)
     try:
         if urllib.request.proxy_bypass(bypass_host):
             return None
     except OSError:
         pass
     proxies = urllib.request.getproxies()
-    raw = proxies.get(parsed.scheme) or proxies.get("http")
+    # Match urllib: scheme-specific first, then ALL_PROXY ("all"); never fall HTTP_PROXY onto HTTPS.
+    raw = proxies.get(parsed.scheme) or proxies.get("all")
     if not raw:
         return None
     proxy = _parse_proxy_setting(raw)
@@ -175,11 +202,14 @@ def _proxy_authorization(proxy: urllib.parse.ParseResult) -> dict[str, str]:
     return {"Proxy-Authorization": f"Basic {token}"}
 
 
-def _socket_authority(address: str, port: int) -> str:
+def _bracket_ip_literal(address: str) -> str:
     host = address.split("%", 1)[0]
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    return f"{host}:{port}"
+    try:
+        if ipaddress.ip_address(host).version == 6 and not host.startswith("["):
+            return f"[{host}]"
+    except ValueError:
+        pass
+    return host
 
 
 def _ascii_hostname(hostname: str) -> str:
@@ -208,6 +238,26 @@ def _http_host_header(parsed: urllib.parse.ParseResult, target_port: int) -> str
     return f"{hostname}:{target_port}"
 
 
+class ProxyPinnedHTTPConnection(http.client.HTTPConnection):
+    """CONNECT to a validated endpoint IP via an HTTP proxy, then request with original Host."""
+
+    def __init__(
+        self,
+        proxy_host: str,
+        proxy_port: int,
+        *,
+        endpoint_ip: str,
+        target_port: int,
+        timeout: int,
+        tunnel_headers: dict[str, str] | None = None,
+    ):
+        super().__init__(proxy_host, port=proxy_port, timeout=timeout)
+        tunnel_host = _bracket_ip_literal(endpoint_ip)
+        headers = dict(tunnel_headers or {})
+        headers.setdefault("Host", f"{tunnel_host}:{target_port}")
+        self.set_tunnel(tunnel_host, target_port, headers=headers)
+
+
 class ProxyPinnedHTTPSConnection(http.client.HTTPSConnection):
     """CONNECT to a validated endpoint IP via an HTTP proxy, TLS with original hostname SNI."""
 
@@ -226,12 +276,7 @@ class ProxyPinnedHTTPSConnection(http.client.HTTPSConnection):
         context.set_alpn_protocols(["http/1.1"])
         super().__init__(proxy_host, port=proxy_port, timeout=timeout, context=context)
         # Bracket IPv6 so CONNECT and the tunnel Host header share a clear authority form.
-        tunnel_host = endpoint_ip.split("%", 1)[0]
-        try:
-            if ipaddress.ip_address(tunnel_host).version == 6 and not tunnel_host.startswith("["):
-                tunnel_host = f"[{tunnel_host}]"
-        except ValueError:
-            pass
+        tunnel_host = _bracket_ip_literal(endpoint_ip)
         headers = dict(tunnel_headers or {})
         headers.setdefault("Host", f"{tunnel_host}:{target_port}")
         self.set_tunnel(tunnel_host, target_port, headers=headers)
@@ -262,7 +307,11 @@ def request_via_proxy(
         raise OSError("proxy or target host is missing")
     if not endpoints:
         raise OSError("no validated endpoints available for proxied request")
-    proxy_port = proxy.port if proxy.port is not None else (443 if proxy.scheme == "https" else 80)
+    # CONNECT tunnels require an http:// proxy for both cleartext and TLS targets so the
+    # absolute-form Host/authority mismatch cannot replace the original hostname.
+    if proxy.scheme != "http":
+        raise OSError("proxied fetches require an http:// proxy for CONNECT tunneling")
+    proxy_port = proxy.port if proxy.port is not None else 80
     target_port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
     auth_headers = _proxy_authorization(proxy)
     host_header = _http_host_header(parsed, target_port)
@@ -273,9 +322,6 @@ def request_via_proxy(
         connection: http.client.HTTPConnection
         try:
             if parsed.scheme == "https":
-                # CONNECT via an HTTP proxy, then TLS to the public target (common HTTPS_PROXY shape).
-                if proxy.scheme != "http":
-                    raise OSError("HTTPS targets require an http:// proxy for CONNECT tunneling")
                 connection = ProxyPinnedHTTPSConnection(
                     proxy.hostname,
                     proxy_port,
@@ -285,31 +331,19 @@ def request_via_proxy(
                     timeout=timeout,
                     tunnel_headers=auth_headers or None,
                 )
-                request_target = path
-                headers = {"User-Agent": USER_AGENT, "Host": host_header}
             else:
-                if proxy.scheme == "https":
-                    context = ssl.create_default_context()
-                    connection = http.client.HTTPSConnection(
-                        proxy.hostname, proxy_port, timeout=timeout, context=context
-                    )
-                else:
-                    connection = http.client.HTTPConnection(proxy.hostname, proxy_port, timeout=timeout)
-                # Absolute-form request uses the validated IP so the proxy cannot rebind DNS.
-                request_target = urllib.parse.urlunparse(
-                    (
-                        parsed.scheme,
-                        _socket_authority(endpoint_ip, target_port),
-                        parsed.path or "/",
-                        parsed.params,
-                        parsed.query,
-                        "",
-                    )
+                connection = ProxyPinnedHTTPConnection(
+                    proxy.hostname,
+                    proxy_port,
+                    endpoint_ip=endpoint_ip,
+                    target_port=target_port,
+                    timeout=timeout,
+                    tunnel_headers=auth_headers or None,
                 )
-                headers = {"User-Agent": USER_AGENT, "Host": host_header, **auth_headers}
+            headers = {"User-Agent": USER_AGENT, "Host": host_header}
 
             try:
-                connection.request("GET", request_target, headers=headers)
+                connection.request("GET", path, headers=headers)
                 response = connection.getresponse()
                 body = response.read(max_body_bytes)
                 return {
