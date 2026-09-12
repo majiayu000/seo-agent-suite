@@ -203,7 +203,7 @@ discoverability:
             self.assertEqual(evidence["checks"][check_name]["status"], "error")
 
     def test_http_check_blocks_private_dns_and_private_redirect_targets(self) -> None:
-        module = load_script("repo_seo_baseline.py")
+        module = load_script("public_http.py")
         private_answer = [
             (module.socket.AF_INET, module.socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))
         ]
@@ -242,7 +242,7 @@ discoverability:
         connect_endpoint.assert_called_once_with(public_answer[0], 15)
 
     def test_public_url_validation_covers_credentials_ports_dns_and_redirects(self) -> None:
-        module = load_script("repo_seo_baseline.py")
+        module = load_script("public_http.py")
         public_answer = [
             (module.socket.AF_INET, module.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
         ]
@@ -271,7 +271,7 @@ discoverability:
             module.validate_public_http_url("https://empty.example")
 
     def test_request_uses_the_validated_endpoint_without_resolving_again(self) -> None:
-        module = load_script("repo_seo_baseline.py")
+        module = load_script("public_http.py")
         public_answer = [
             (module.socket.AF_INET, module.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))
         ]
@@ -296,7 +296,7 @@ discoverability:
         connect_endpoint.assert_called_once_with(public_answer[0], 9)
 
     def test_endpoint_connector_closes_failed_sockets(self) -> None:
-        module = load_script("repo_seo_baseline.py")
+        module = load_script("public_http.py")
         endpoint = (module.socket.AF_INET, module.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))
         sock = mock.Mock()
         with mock.patch.object(module.socket, "socket", return_value=sock):
@@ -315,7 +315,7 @@ discoverability:
         failed_sock.close.assert_called_once()
 
     def test_https_connection_preserves_hostname_for_sni_and_certificate_checks(self) -> None:
-        module = load_script("repo_seo_baseline.py")
+        module = load_script("public_http.py")
         endpoint = (module.socket.AF_INET, module.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
         context = mock.Mock()
         raw_socket = mock.Mock()
@@ -343,7 +343,7 @@ discoverability:
         raw_socket.close.assert_called_once()
 
     def test_request_reports_failure_when_all_pinned_endpoints_fail(self) -> None:
-        module = load_script("repo_seo_baseline.py")
+        module = load_script("public_http.py")
         public_answer = [
             (module.socket.AF_INET, module.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))
         ]
@@ -358,9 +358,12 @@ discoverability:
         connection.close.assert_called_once()
 
     def test_http_check_surfaces_status_redirect_and_transport_errors(self) -> None:
-        module = load_script("repo_seo_baseline.py")
+        module = load_script("public_http.py")
         cases = [
             ({"http_status": 404, "location": None, "content_type": None, "sample_bytes": 0}, "HTTP status 404"),
+            ({"http_status": 300, "location": None, "content_type": None, "sample_bytes": 0}, "HTTP status 300"),
+            ({"http_status": 304, "location": None, "content_type": None, "sample_bytes": 0}, "HTTP status 304"),
+            ({"http_status": 305, "location": None, "content_type": None, "sample_bytes": 0}, "HTTP status 305"),
             ({"http_status": 302, "location": None, "content_type": None, "sample_bytes": 0}, "missing Location"),
         ]
         for response, expected_reason in cases:
@@ -389,11 +392,54 @@ discoverability:
             "location": None,
             "content_type": "text/html",
             "sample_bytes": 2,
+            "body": b"ok",
         }
         with mock.patch.object(module, "request_public_url_once", return_value=success_response):
             result = module.http_check("https://example.com")
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["sample_bytes"], 2)
+        self.assertNotIn("body", result)
+
+    def test_request_preserves_semicolon_path_parameters(self) -> None:
+        module = load_script("public_http.py")
+        public_answer = [
+            (module.socket.AF_INET, module.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))
+        ]
+        connection = mock.Mock()
+        response = mock.Mock()
+        response.status = 200
+        response.read.return_value = b"ok"
+        response.getheader.side_effect = lambda name: {
+            "content-type": "text/plain",
+            "location": None,
+        }.get(name)
+        connection.getresponse.return_value = response
+        with (
+            mock.patch.object(module.socket, "getaddrinfo", return_value=public_answer),
+            mock.patch.object(module, "PinnedHTTPConnection", return_value=connection),
+        ):
+            module.request_public_url_once("http://example.com/page;variant=mobile?q=1", 5)
+        connection.request.assert_called_once_with(
+            "GET",
+            "/page;variant=mobile?q=1",
+            headers={"User-Agent": "github-repo-seo-skill/1.0"},
+        )
+        connection.close.assert_called_once()
+
+    def test_charset_from_content_type_parses_quoted_parameters(self) -> None:
+        module = load_script("public_http.py")
+        cases = [
+            ("text/html; charset=utf-8", "utf-8"),
+            ("text/html; charset = utf-8", "utf-8"),
+            ('text/html; foo="x;charset=bogus"; charset=iso-8859-1', "iso-8859-1"),
+            ('text/html; charset="utf-8"', "utf-8"),
+            ("text/html; charset=not-a-codec", None),
+            (None, None),
+            ("", None),
+        ]
+        for header, expected in cases:
+            with self.subTest(header=header):
+                self.assertEqual(module.charset_from_content_type(header), expected)
 
     def test_package_json_root_must_be_an_object(self) -> None:
         module = load_script("repo_seo_baseline.py")
@@ -448,6 +494,73 @@ class SiteMetaAuditTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("url must be an http(s) URL", result.stderr)
+
+    def test_cli_rejects_url_credentials(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "site_meta_audit.py"),
+                "https://user:pass@example.com/",
+                "--json",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("URL credentials are not allowed", result.stderr)
+
+    def test_fetch_blocks_private_dns_and_private_redirect_targets(self) -> None:
+        module = load_script("site_meta_audit.py")
+        http = module.public_http
+        private_answer = [
+            (http.socket.AF_INET, http.socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))
+        ]
+        with (
+            mock.patch.object(http.socket, "getaddrinfo", return_value=private_answer),
+            mock.patch.object(http, "connect_endpoint") as connect_endpoint,
+        ):
+            result = module.fetch("http://audit-target.example")
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("non-public", result["reason"])
+        connect_endpoint.assert_not_called()
+
+        public_answer = [
+            (http.socket.AF_INET, http.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))
+        ]
+        client, server = http.socket.socketpair()
+        server.sendall(
+            b"HTTP/1.1 302 Found\r\nContent-Length: 0\r\n"
+            b"Location: http://metadata.example/latest\r\n\r\n"
+        )
+        try:
+            with (
+                mock.patch.object(
+                    http.socket, "getaddrinfo", side_effect=[public_answer, private_answer]
+                ) as getaddrinfo,
+                mock.patch.object(http, "connect_endpoint", return_value=client) as connect_endpoint,
+            ):
+                result = module.fetch("http://public.example/start")
+        finally:
+            server.close()
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("redirect blocked", result["reason"])
+        self.assertEqual(getaddrinfo.call_count, 2)
+        connect_endpoint.assert_called_once_with(public_answer[0], 20)
+
+    def test_fetch_rejects_credentials_and_unsupported_schemes(self) -> None:
+        module = load_script("site_meta_audit.py")
+        for url in ("file:///tmp/index.html", "https://user:pass@example.com/"):
+            with self.subTest(url=url):
+                result = module.fetch(url)
+            self.assertEqual(result["status"], "error")
+            self.assertTrue(
+                "unsupported URL scheme" in result["reason"]
+                or "credentials" in result["reason"]
+            )
 
     def test_html_soft_404_is_not_resource_present(self) -> None:
         module = load_script("site_meta_audit.py")
