@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import subprocess
 import sys
@@ -792,8 +793,34 @@ class SiteMetaAuditTests(unittest.TestCase):
             check=False,
         )
 
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("url must be a public http(s) URL", result.stderr)
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["page"]["status"], "error")
+        self.assertIn("unsupported URL scheme", payload["page"]["reason"])
+
+    def test_json_dns_failure_emits_structured_error(self) -> None:
+        """--json must keep stdout parseable when hostname resolution fails."""
+        module = load_script("site_meta_audit.py")
+        shared = public_http_mod(module)
+        url = "https://unresolved.example/"
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(
+                shared.socket,
+                "getaddrinfo",
+                side_effect=shared.socket.gaierror(-2, "Name or service not known"),
+            ),
+            mock.patch.object(sys, "argv", ["site_meta_audit.py", url, "--json"]),
+            mock.patch.object(sys, "stdout", stdout),
+        ):
+            code = module.main()
+
+        self.assertEqual(code, 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["url"], url)
+        self.assertEqual(payload["page"]["status"], "error")
+        self.assertIn("hostname resolution failed", payload["page"]["reason"])
+        self.assertNotIn("usage:", stdout.getvalue().lower())
 
     def test_html_soft_404_is_not_resource_present(self) -> None:
         module = load_script("site_meta_audit.py")
@@ -880,9 +907,15 @@ class SiteMetaAuditTests(unittest.TestCase):
             check=False,
         )
 
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("url must be a public http(s) URL", result.stderr)
-        self.assertIn("credentials", result.stderr)
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["page"]["status"], "error")
+        self.assertIn("credentials", payload["page"]["reason"])
+        self.assertEqual(payload["url"], "https://example.com/")
+        self.assertEqual(payload["page"]["url"], "https://example.com/")
+        # Credentials must not leak into JSON or stderr.
+        self.assertNotIn("user:pass", result.stdout)
+        self.assertNotIn("user:pass", result.stderr)
 
 
 if __name__ == "__main__":

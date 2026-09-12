@@ -15,7 +15,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import public_http
-from public_http import fetch_public_url, validate_public_http_url  # noqa: E402
+from public_http import fetch_public_url, redact_url  # noqa: E402
 
 
 class MetaParser(HTMLParser):
@@ -127,7 +127,7 @@ def resource_present(item: dict, filename: str) -> tuple[bool, str]:
 
 def audit(url: str) -> dict:
     page = fetch(url)
-    result = {"url": url, "page": {key: value for key, value in page.items() if key != "body"}}
+    result = {"url": redact_url(url), "page": {key: value for key, value in page.items() if key != "body"}}
     if page.get("status") != "ok":
         return result
 
@@ -168,16 +168,13 @@ def main() -> int:
     parser.add_argument("url", help="Public URL to inspect.")
     parser.add_argument("--json", action="store_true", help="Emit JSON output.")
     args = parser.parse_args()
-    try:
-        validate_public_http_url(args.url)
-    except ValueError as exc:
-        parser.error(f"url must be a public http(s) URL: {exc}")
-
+    # Leave URL/DNS validation to audit→fetch so --json always emits structured
+    # page errors (exit 1) instead of argparse usage text (exit 2) on resolution failures.
     result = audit(args.url)
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
-        print(f"url: {args.url}")
+        print(f"url: {result.get('url', args.url)}")
         print(f"status: {result.get('page', {}).get('http_status')}")
         print(f"title: {result.get('title')}")
         print(f"description: {result.get('meta_description')}")
