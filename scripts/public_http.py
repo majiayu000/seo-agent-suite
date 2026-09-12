@@ -133,7 +133,7 @@ def fetch_public_http(
                 return {"status": "error", "url": current_url, "reason": "too many redirects"}
             current_url = urllib.parse.urljoin(current_url, location)
             continue
-        if status >= 400:
+        if not 200 <= status < 300:
             return {
                 "status": "error",
                 "url": current_url,

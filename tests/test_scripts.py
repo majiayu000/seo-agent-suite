@@ -361,6 +361,9 @@ discoverability:
         module = load_script("public_http.py")
         cases = [
             ({"http_status": 404, "location": None, "content_type": None, "sample_bytes": 0}, "HTTP status 404"),
+            ({"http_status": 300, "location": None, "content_type": None, "sample_bytes": 0}, "HTTP status 300"),
+            ({"http_status": 304, "location": None, "content_type": None, "sample_bytes": 0}, "HTTP status 304"),
+            ({"http_status": 305, "location": None, "content_type": None, "sample_bytes": 0}, "HTTP status 305"),
             ({"http_status": 302, "location": None, "content_type": None, "sample_bytes": 0}, "missing Location"),
         ]
         for response, expected_reason in cases:
