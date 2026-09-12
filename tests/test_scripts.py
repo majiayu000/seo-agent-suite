@@ -580,6 +580,23 @@ discoverability:
             "socks5://proxy.example:1080",
         )
 
+    def test_select_proxy_rejects_https_proxy_scheme(self) -> None:
+        """https:// proxies must fail at selection, matching request_via_proxy."""
+        module = load_script("public_http.py")
+        parsed = module.urllib.parse.urlparse("https://example.com")
+        with mock.patch.object(
+            module.urllib.request,
+            "getproxies",
+            return_value={"https": "https://user:secret@proxy.example:8443"},
+        ), mock.patch.object(module.urllib.request, "proxy_bypass", return_value=False):
+            with self.assertRaises(OSError) as raised:
+                module.select_proxy(parsed)
+        message = str(raised.exception)
+        self.assertIn("http:// proxy for CONNECT tunneling", message)
+        self.assertIn("https://proxy.example:8443", message)
+        self.assertNotIn("user", message)
+        self.assertNotIn("secret", message)
+
     def test_select_proxy_accepts_authority_form_env_values(self) -> None:
         module = load_script("public_http.py")
         parsed = module.urllib.parse.urlparse("https://example.com")

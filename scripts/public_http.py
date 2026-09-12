@@ -172,7 +172,13 @@ def _proxy_bypass_host(parsed: urllib.parse.ParseResult) -> str:
 
 
 def select_proxy(parsed: urllib.parse.ParseResult) -> urllib.parse.ParseResult | None:
-    """Return an HTTP(S) proxy for the target, honoring env/system proxy settings."""
+    """Return an HTTP proxy for the target, honoring env/system proxy settings.
+
+    Only cleartext http:// proxies are supported: CONNECT tunnels pin the
+    validated endpoint IP while preserving the original Host/SNI. TLS-wrapped
+    https:// proxy endpoints are rejected here so selection matches
+    request_via_proxy (which cannot open a nested TLS CONNECT path).
+    """
     host = parsed.hostname
     if host is None:
         return None
@@ -188,7 +194,14 @@ def select_proxy(parsed: urllib.parse.ParseResult) -> urllib.parse.ParseResult |
     if not raw:
         return None
     proxy = _parse_proxy_setting(raw)
-    if proxy.scheme not in {"http", "https"} or not proxy.hostname:
+    if not proxy.hostname:
+        raise OSError(f"unsupported proxy URL: {redact_proxy_url(raw)}")
+    if proxy.scheme == "https":
+        raise OSError(
+            "proxied fetches require an http:// proxy for CONNECT tunneling; "
+            f"got {redact_proxy_url(raw)}"
+        )
+    if proxy.scheme != "http":
         raise OSError(f"unsupported proxy URL: {redact_proxy_url(raw)}")
     return proxy
 
