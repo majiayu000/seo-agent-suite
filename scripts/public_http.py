@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+import codecs
 import http.client
 import ipaddress
 import socket
 import ssl
 import urllib.parse
+from email.message import Message
 
 SocketAddress = tuple[str, int] | tuple[str, int, int, int]
 ResolvedEndpoint = tuple[int, int, int, str, SocketAddress]
@@ -79,7 +81,7 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
 def request_public_url_once(url: str, timeout: int, *, max_body: int = 2048) -> dict:
     parsed, endpoints = validate_public_http_url(url)
     port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
-    path = urllib.parse.urlunparse(("", "", parsed.path or "/", "", parsed.query, ""))
+    path = urllib.parse.urlunparse(("", "", parsed.path or "/", parsed.params, parsed.query, ""))
     errors: list[str] = []
 
     for endpoint in endpoints:
@@ -153,8 +155,18 @@ def http_check(url: str, timeout: int = 15) -> dict:
 def charset_from_content_type(content_type: str | None) -> str | None:
     if not content_type:
         return None
-    for part in content_type.split(";"):
-        part = part.strip()
-        if part.lower().startswith("charset="):
-            return part.split("=", 1)[1].strip().strip('"') or None
-    return None
+    message = Message()
+    message["content-type"] = content_type
+    charset = message.get_param("charset")
+    if charset is None:
+        return None
+    if isinstance(charset, tuple):
+        charset = charset[-1]
+    charset = str(charset).strip().strip("'\"") or None
+    if not charset:
+        return None
+    try:
+        codecs.lookup(charset)
+    except LookupError:
+        return None
+    return charset

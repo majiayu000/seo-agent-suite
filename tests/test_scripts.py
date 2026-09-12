@@ -397,6 +397,47 @@ discoverability:
         self.assertEqual(result["sample_bytes"], 2)
         self.assertNotIn("body", result)
 
+    def test_request_preserves_semicolon_path_parameters(self) -> None:
+        module = load_script("public_http.py")
+        public_answer = [
+            (module.socket.AF_INET, module.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))
+        ]
+        connection = mock.Mock()
+        response = mock.Mock()
+        response.status = 200
+        response.read.return_value = b"ok"
+        response.getheader.side_effect = lambda name: {
+            "content-type": "text/plain",
+            "location": None,
+        }.get(name)
+        connection.getresponse.return_value = response
+        with (
+            mock.patch.object(module.socket, "getaddrinfo", return_value=public_answer),
+            mock.patch.object(module, "PinnedHTTPConnection", return_value=connection),
+        ):
+            module.request_public_url_once("http://example.com/page;variant=mobile?q=1", 5)
+        connection.request.assert_called_once_with(
+            "GET",
+            "/page;variant=mobile?q=1",
+            headers={"User-Agent": "github-repo-seo-skill/1.0"},
+        )
+        connection.close.assert_called_once()
+
+    def test_charset_from_content_type_parses_quoted_parameters(self) -> None:
+        module = load_script("public_http.py")
+        cases = [
+            ("text/html; charset=utf-8", "utf-8"),
+            ("text/html; charset = utf-8", "utf-8"),
+            ('text/html; foo="x;charset=bogus"; charset=iso-8859-1', "iso-8859-1"),
+            ('text/html; charset="utf-8"', "utf-8"),
+            ("text/html; charset=not-a-codec", None),
+            (None, None),
+            ("", None),
+        ]
+        for header, expected in cases:
+            with self.subTest(header=header):
+                self.assertEqual(module.charset_from_content_type(header), expected)
+
     def test_package_json_root_must_be_an_object(self) -> None:
         module = load_script("repo_seo_baseline.py")
         with tempfile.TemporaryDirectory() as tmp:
