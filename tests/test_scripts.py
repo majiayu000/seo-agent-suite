@@ -659,6 +659,21 @@ discoverability:
             "https://example.com:notaport/",
         )
 
+    def test_redact_url_tolerates_malformed_bracketed_authority(self) -> None:
+        module = load_script("public_http.py")
+        self.assertEqual(
+            module.redact_url("https://user:secret@[bad/"),
+            "https://[bad/",
+        )
+
+    def test_follow_public_http_malformed_bracket_returns_structured_error(self) -> None:
+        module = load_script("public_http.py")
+        result = module.follow_public_http("https://user:secret@[bad/")
+        self.assertEqual(result["status"], "error")
+        self.assertNotIn("user", result["url"])
+        self.assertNotIn("secret", result["url"])
+        self.assertTrue(result.get("reason"))
+
     def test_follow_public_http_redacts_malformed_port_redirect_without_traceback(self) -> None:
         module = load_script("public_http.py")
         redirect = {
@@ -797,6 +812,39 @@ class SiteMetaAuditTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["page"]["status"], "error")
         self.assertIn("unsupported URL scheme", payload["page"]["reason"])
+
+    def test_text_mode_prints_reason_on_validation_failure(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "site_meta_audit.py"), "file:///tmp/index.html"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("reason: unsupported URL scheme", result.stdout)
+        self.assertIn("status:", result.stdout)
+
+    def test_json_malformed_bracket_authority_emits_structured_error(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "site_meta_audit.py"),
+                "https://user:secret@[bad/",
+                "--json",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("Traceback", result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["page"]["status"], "error")
+        self.assertNotIn("user", payload["url"])
+        self.assertNotIn("secret", payload["url"])
+        self.assertTrue(payload["page"].get("reason"))
 
     def test_json_dns_failure_emits_structured_error(self) -> None:
         """--json must keep stdout parseable when hostname resolution fails."""

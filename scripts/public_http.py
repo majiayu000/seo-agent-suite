@@ -117,9 +117,21 @@ def redact_proxy_url(raw: str) -> str:
     return "<unparseable-proxy>"
 
 
+def _strip_userinfo_heuristic(url: str) -> str:
+    """Best-effort credential strip when urlparse cannot handle the authority."""
+    if "://" in url and "@" in url.split("://", 1)[1]:
+        scheme, rest = url.split("://", 1)
+        return f"{scheme}://{rest.rsplit('@', 1)[-1]}"
+    return url
+
+
 def redact_url(url: str) -> str:
     """Return a URL with userinfo removed so credentials never reach audit output."""
-    parsed = urllib.parse.urlparse(url)
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        # Malformed bracketed authorities raise before any guarded request path.
+        return _strip_userinfo_heuristic(url)
     if parsed.username is None and parsed.password is None:
         return url
     host = parsed.hostname or ""

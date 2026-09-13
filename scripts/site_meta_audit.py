@@ -174,8 +174,11 @@ def main() -> int:
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
+        page = result.get("page", {})
         print(f"url: {result.get('url', args.url)}")
-        print(f"status: {result.get('page', {}).get('http_status')}")
+        print(f"status: {page.get('http_status')}")
+        if page.get("status") == "error" and page.get("reason"):
+            print(f"reason: {page.get('reason')}")
         print(f"title: {result.get('title')}")
         print(f"description: {result.get('meta_description')}")
         print(f"canonical: {result.get('canonical')}")
