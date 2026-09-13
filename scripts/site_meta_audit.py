@@ -15,12 +15,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import public_http
-from public_http import charset_from_content_type, fetch_public_http
-
-# Re-export for tests that patch socket/connect helpers through this script.
-socket = public_http.socket
-connect_endpoint = public_http.connect_endpoint
-request_public_url_once = public_http.request_public_url_once
+from public_http import fetch_public_url, redact_url  # noqa: E402
 
 
 class MetaParser(HTMLParser):
@@ -70,19 +65,7 @@ class MetaParser(HTMLParser):
 
 
 def fetch(url: str, timeout: int = 20) -> dict:
-    result = fetch_public_http(url, timeout=timeout, max_body=1_000_000)
-    if result.get("status") != "ok":
-        return {key: value for key, value in result.items() if key != "body"}
-
-    body = result.get("body") or b""
-    charset = charset_from_content_type(result.get("content_type")) or "utf-8"
-    return {
-        "status": "ok",
-        "url": result["url"],
-        "http_status": result["http_status"],
-        "content_type": result.get("content_type"),
-        "body": body.decode(charset, errors="replace"),
-    }
+    return fetch_public_url(url, timeout=timeout)
 
 
 def first_meta(parser: MetaParser, key: str, value: str) -> str | None:
@@ -144,7 +127,7 @@ def resource_present(item: dict, filename: str) -> tuple[bool, str]:
 
 def audit(url: str) -> dict:
     page = fetch(url)
-    result = {"url": url, "page": {key: value for key, value in page.items() if key != "body"}}
+    result = {"url": redact_url(url), "page": {key: value for key, value in page.items() if key != "body"}}
     if page.get("status") != "ok":
         return result
 
@@ -185,18 +168,17 @@ def main() -> int:
     parser.add_argument("url", help="Public URL to inspect.")
     parser.add_argument("--json", action="store_true", help="Emit JSON output.")
     args = parser.parse_args()
-    parsed = urllib.parse.urlparse(args.url)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        parser.error(f"url must be an http(s) URL: {args.url}")
-    if parsed.username is not None or parsed.password is not None:
-        parser.error("URL credentials are not allowed")
-
+    # Leave URL/DNS validation to audit→fetch so --json always emits structured
+    # page errors (exit 1) instead of argparse usage text (exit 2) on resolution failures.
     result = audit(args.url)
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
-        print(f"url: {args.url}")
-        print(f"status: {result.get('page', {}).get('http_status')}")
+        page = result.get("page", {})
+        print(f"url: {result.get('url', args.url)}")
+        print(f"status: {page.get('http_status')}")
+        if page.get("status") == "error" and page.get("reason"):
+            print(f"reason: {page.get('reason')}")
         print(f"title: {result.get('title')}")
         print(f"description: {result.get('meta_description')}")
         print(f"canonical: {result.get('canonical')}")
