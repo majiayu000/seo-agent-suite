@@ -121,6 +121,21 @@ def site_resource_checks(homepage: str) -> dict:
     return checks
 
 
+def registry_name_error(name: object, registry: str, path: str) -> dict | None:
+    if registry == "npm":
+        valid = (
+            isinstance(name, str)
+            and len(name) <= 214
+            and not name.startswith(("-", ".", "_"))
+            and re.fullmatch(r"(?:@[a-z0-9._-]+/)?[a-z0-9._-]+", name) is not None
+        )
+    else:
+        valid = isinstance(name, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", name) is not None
+    if valid:
+        return None
+    return {"status": "error", "path": path, "reason": f"invalid {registry} package name"}
+
+
 def collect_manifests(root: Path) -> dict:
     manifests: dict[str, object] = {"npm": [], "cargo": None, "python": None, "errors": []}
 
@@ -131,6 +146,11 @@ def collect_manifests(root: Path) -> dict:
         if json_error:
             manifests["errors"].append({**json_error, "path": str(path.relative_to(root))})
             continue
+        if "name" in data:
+            name_error = registry_name_error(data["name"], "npm", str(path.relative_to(root)))
+            if name_error:
+                manifests["errors"].append(name_error)
+                continue
         manifests["npm"].append(
             {
                 "path": str(path.relative_to(root)),
@@ -152,16 +172,21 @@ def collect_manifests(root: Path) -> dict:
             manifests["cargo"] = {"path": "Cargo.toml", "status": "error", "reason": cargo_error["reason"]}
     if cargo_data:
         package = cargo_data.get("package", {})
-        manifests["cargo"] = {
-            "path": "Cargo.toml",
-            "name": package.get("name"),
-            "description": package.get("description"),
-            "homepage": package.get("homepage"),
-            "repository": package.get("repository"),
-            "readme": package.get("readme"),
-            "keywords": package.get("keywords"),
-            "categories": package.get("categories"),
-        }
+        name_error = registry_name_error(package["name"], "cargo", "Cargo.toml") if "name" in package else None
+        if name_error:
+            manifests["errors"].append(name_error)
+            manifests["cargo"] = name_error
+        else:
+            manifests["cargo"] = {
+                "path": "Cargo.toml",
+                "name": package.get("name"),
+                "description": package.get("description"),
+                "homepage": package.get("homepage"),
+                "repository": package.get("repository"),
+                "readme": package.get("readme"),
+                "keywords": package.get("keywords"),
+                "categories": package.get("categories"),
+            }
 
     pyproject = root / "pyproject.toml"
     pyproject_data = None
@@ -406,8 +431,18 @@ def main() -> int:
     except ValueError as exc:
         parser.error(str(exc))
     homepages = list(dict.fromkeys(explicit_homepages + infer_homepages(manifests)))
-    npm_packages = list(args.npm)
-    crate_names = list(args.crate)
+    npm_packages: list[str] = []
+    crate_names: list[str] = []
+    for option, values, registry, names in (
+        ("--npm", args.npm, "npm", npm_packages),
+        ("--crate", args.crate, "cargo", crate_names),
+    ):
+        for name in values:
+            name_error = registry_name_error(name, registry, option)
+            if name_error:
+                manifests["errors"].append(name_error)
+            else:
+                names.append(name)
 
     for item in manifests.get("npm", []):
         if isinstance(item, dict) and item.get("name") and item["name"] not in npm_packages:
@@ -443,8 +478,8 @@ def main() -> int:
         "manifests": manifests,
         "readmes": collect_readmes(root),
         "registry": {
-            "npm": {pkg: run_cmd(["npm", "view", pkg, "--json"], cwd=root) for pkg in npm_packages},
-            "crates": {crate: run_cmd(["cargo", "search", crate, "--limit", "3"], cwd=root) for crate in crate_names},
+            "npm": {pkg: run_cmd(["npm", "view", "--json", "--", pkg], cwd=root) for pkg in npm_packages},
+            "crates": {crate: run_cmd(["cargo", "search", "--limit", "3", "--", crate], cwd=root) for crate in crate_names},
         },
         "site": {
             homepage: site_resource_checks(homepage)

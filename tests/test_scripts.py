@@ -799,6 +799,134 @@ discoverability:
         self.assertEqual(errors[0]["reason"], "redirect blocked")
 
 
+class RegistryPackageNameTests(unittest.TestCase):
+    def audit(self, root: Path, *args: str):
+        module = load_script("repo_seo_baseline.py")
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", ["repo_seo_baseline.py", "--root", str(root), *args]),
+            mock.patch.object(sys, "stdout", stdout),
+            mock.patch.object(module, "run_cmd", return_value={"status": "ok"}) as run_cmd,
+        ):
+            code = module.main()
+        return code, stdout.getvalue(), [call.args[0] for call in run_cmd.call_args_list]
+
+    def test_manifest_flags_are_errors_and_never_reach_registry_commands(self) -> None:
+        npm_flag = "--registry=http://127.0.0.1:9"
+        cargo_flag = "--index=sparse+http://127.0.0.1:9/"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text('{"name":"demo"}', encoding="utf-8")
+            nested = root / "nested"
+            nested.mkdir()
+            (nested / "package.json").write_text(json.dumps({"name": npm_flag}), encoding="utf-8")
+            (root / "Cargo.toml").write_text(f'[package]\nname = "{cargo_flag}"\n', encoding="utf-8")
+
+            code, output, commands = self.audit(root, "--json")
+
+        self.assertNotIn(npm_flag, [arg for command in commands for arg in command])
+        self.assertNotIn(cargo_flag, [arg for command in commands for arg in command])
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(set(payload["registry"]["npm"]), {"demo"})
+        self.assertEqual(payload["registry"]["crates"], {})
+        self.assertEqual(
+            {error["path"] for error in payload["manifests"]["errors"]},
+            {"nested/package.json", "Cargo.toml"},
+        )
+        self.assertTrue(all(error["surface"] == "manifest" for error in payload["errors"]))
+
+    def test_invalid_manifest_name_types_and_syntax_fail_without_registry_calls(self) -> None:
+        invalid_npm = [
+            1, 0, True, False, None, ["demo"], {"name": "demo"}, "", " demo", "demo ",
+            "demo\n", "-demo", ".demo", "_demo", "UpperCase", "demo@1", "https://example.com",
+            "@scope/", "scope/demo", "@scope/demo/extra", "démø", "a" * 215,
+        ]
+        invalid_cargo = [
+            1, 0, True, False, ["demo"], {"name": "demo"}, "", " demo", "demo ", "demo\n",
+            "-demo", "_demo", "1demo", "demo@1", "demo.crate", "démø", "a" * 65,
+        ]
+        for registry, names in (("npm", invalid_npm), ("cargo", invalid_cargo)):
+            for name in names:
+                with self.subTest(registry=registry, name=name), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    if registry == "npm":
+                        path = "package.json"
+                        (root / path).write_text(json.dumps({"name": name}), encoding="utf-8")
+                    else:
+                        path = "Cargo.toml"
+                        value = '{name = "demo"}' if isinstance(name, dict) else json.dumps(name)
+                        (root / path).write_text(f"[package]\nname = {value}\n", encoding="utf-8")
+                    code, output, commands = self.audit(root, "--json")
+
+                self.assertFalse(any(command[0] in {"npm", "cargo"} for command in commands))
+                self.assertEqual(code, 1)
+                payload = json.loads(output)
+                self.assertEqual(payload["status"], "error")
+                self.assertEqual(payload["manifests"]["errors"][0]["path"], path)
+                self.assertEqual(payload["errors"][0]["surface"], "manifest")
+                self.assertIn("package name", payload["errors"][0]["reason"])
+
+    def test_invalid_cli_names_use_the_structured_error_gate(self) -> None:
+        for flag, name in (
+            ("--npm", "--registry=http://127.0.0.1:9"),
+            ("--crate", "--index=sparse+http://127.0.0.1:9/"),
+            ("--npm", "demo@1"),
+            ("--crate", "demo.crate"),
+            ("--npm", ""),
+            ("--crate", ""),
+        ):
+            for output_mode in ([], ["--json"]):
+                with self.subTest(flag=flag, name=name, mode=output_mode), tempfile.TemporaryDirectory() as tmp:
+                    code, output, commands = self.audit(Path(tmp), f"{flag}={name}", *output_mode)
+                self.assertFalse(any(command[0] in {"npm", "cargo"} for command in commands))
+                self.assertEqual(code, 1)
+                if output_mode:
+                    payload = json.loads(output)
+                    self.assertEqual(payload["status"], "error")
+                    self.assertEqual(payload["manifests"]["errors"][0]["path"], flag)
+                else:
+                    self.assertIn("status: error", output)
+                    self.assertIn("package name", output)
+
+    def test_valid_names_are_deduplicated_and_passed_as_operands(self) -> None:
+        npm_names = ["demo", "@scope/demo", "demo.js", "demo_name", "214" + "a" * 211]
+        cargo_names = ["demo-crate", "Demo_crate", "a" * 64]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text('{"name":"demo"}', encoding="utf-8")
+            (root / "Cargo.toml").write_text('[package]\nname = "demo-crate"\n', encoding="utf-8")
+            args = [f"--npm={name}" for name in npm_names]
+            args += [f"--crate={name}" for name in cargo_names]
+            code, output, commands = self.audit(root, *args, "--json")
+
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["manifests"]["errors"], [])
+        self.assertEqual(set(payload["registry"]["npm"]), set(npm_names))
+        self.assertEqual(set(payload["registry"]["crates"]), set(cargo_names))
+        self.assertEqual(
+            [command for command in commands if command[0] == "npm"],
+            [["npm", "view", "--json", "--", name] for name in npm_names],
+        )
+        self.assertEqual(
+            [command for command in commands if command[0] == "cargo"],
+            [["cargo", "search", "--limit", "3", "--", name] for name in cargo_names],
+        )
+
+    def test_unnamed_npm_projects_and_cargo_workspaces_remain_optional(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text('{}', encoding="utf-8")
+            (root / "Cargo.toml").write_text('[workspace]\nmembers = []\n', encoding="utf-8")
+            code, output, commands = self.audit(root, "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output)["manifests"]["errors"], [])
+        self.assertFalse(any(command[0] in {"npm", "cargo"} for command in commands))
+
+
 class SiteMetaAuditTests(unittest.TestCase):
     def test_invalid_url_scheme_fails(self) -> None:
         result = subprocess.run(
