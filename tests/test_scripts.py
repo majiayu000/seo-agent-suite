@@ -840,8 +840,9 @@ class RegistryPackageNameTests(unittest.TestCase):
     def test_invalid_manifest_name_types_and_syntax_fail_without_registry_calls(self) -> None:
         invalid_npm = [
             1, 0, True, False, None, ["demo"], {"name": "demo"}, "", " demo", "demo ",
-            "demo\n", ".demo", "_demo", "UpperCase", "demo@1", "https://example.com",
-            "@scope/", "scope/demo", "@scope/demo/extra", "démø", "a" * 215,
+            "demo\n", ".demo", "_demo", "demo@1", "https://example.com",
+            "@scope/", "scope/demo", "@scope/demo/extra", "@scope/.foo", "@scope/..foo",
+            "@scope/..", "démø", "a" * 215,
         ]
         invalid_cargo = [
             1, 0, True, False, ["demo"], {"name": "demo"}, "", " demo", "demo ", "demo\n",
@@ -873,6 +874,7 @@ class RegistryPackageNameTests(unittest.TestCase):
             ("--npm", "--registry=http://127.0.0.1:9"),
             ("--crate", "--index=sparse+http://127.0.0.1:9/"),
             ("--npm", "demo@1"),
+            ("--npm", "@scope/.foo"),
             ("--crate", "demo.crate"),
             ("--npm", ""),
             ("--crate", ""),
@@ -891,11 +893,14 @@ class RegistryPackageNameTests(unittest.TestCase):
                     self.assertIn("package name", output)
 
     def test_valid_names_are_deduplicated_and_passed_as_operands(self) -> None:
-        npm_names = ["demo", "@scope/demo", "demo.js", "demo_name", "-foo", "--registry", "214" + "a" * 211]
+        npm_names = [
+            "demo", "@scope/demo", "demo.js", "demo_name", "-foo", "--registry",
+            "JSONStream", "214" + "a" * 211,
+        ]
         cargo_names = ["demo-crate", "Demo_crate", "a" * 64]
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "package.json").write_text('{"name":"demo"}', encoding="utf-8")
+            (root / "package.json").write_text('{"name":"JSONStream"}', encoding="utf-8")
             (root / "Cargo.toml").write_text('[package]\nname = "demo-crate"\n', encoding="utf-8")
             args = [f"--npm={name}" for name in npm_names]
             args += [f"--crate={name}" for name in cargo_names]
@@ -925,6 +930,43 @@ class RegistryPackageNameTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(output)["manifests"]["errors"], [])
         self.assertFalse(any(command[0] in {"npm", "cargo"} for command in commands))
+
+    def test_invalid_names_preserve_metadata_and_homepage_audits(self) -> None:
+        module = load_script("repo_seo_baseline.py")
+        stdout = io.StringIO()
+        npm_homepage = "https://npm-site.example"
+        cargo_homepage = "https://cargo-site.example"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text(json.dumps({
+                "name": "--registry=http://127.0.0.1:9", "homepage": npm_homepage,
+                "description": "npm metadata", "keywords": ["seo"],
+            }), encoding="utf-8")
+            (root / "Cargo.toml").write_text(
+                '[package]\nname = "--index=sparse+http://127.0.0.1:9/"\n'
+                f'homepage = "{cargo_homepage}"\ndescription = "cargo metadata"\n',
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(sys, "argv", ["repo_seo_baseline.py", "--root", tmp, "--json"]),
+                mock.patch.object(sys, "stdout", stdout),
+                mock.patch.object(module, "run_cmd", return_value={"status": "ok"}) as run_cmd,
+                mock.patch.object(module, "site_resource_checks", return_value={
+                    "homepage": {"status": "ok"}, "robots": {"status": "ok"}, "sitemap": {"status": "ok"},
+                }) as site_checks,
+            ):
+                code = module.main()
+
+        self.assertEqual(code, 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(len(payload["manifests"]["npm"]), 1)
+        self.assertEqual(payload["manifests"]["npm"][0]["description"], "npm metadata")
+        self.assertEqual(payload["manifests"]["npm"][0]["keywords"], ["seo"])
+        self.assertEqual(payload["manifests"]["cargo"]["description"], "cargo metadata")
+        self.assertEqual(set(payload["site"]), {npm_homepage, cargo_homepage})
+        self.assertEqual({call.args[0] for call in site_checks.call_args_list}, {npm_homepage, cargo_homepage})
+        self.assertFalse(any(call.args[0][0] in {"npm", "cargo"} for call in run_cmd.call_args_list))
+        self.assertEqual(len(payload["manifests"]["errors"]), 2)
 
 
 class SiteMetaAuditTests(unittest.TestCase):

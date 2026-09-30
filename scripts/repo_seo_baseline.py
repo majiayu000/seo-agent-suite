@@ -127,7 +127,7 @@ def registry_name_error(name: object, registry: str, path: str) -> dict | None:
             isinstance(name, str)
             and len(name) <= 214
             and not name.startswith((".", "_"))
-            and re.fullmatch(r"(?:@[a-z0-9._-]+/)?[a-z0-9._-]+", name) is not None
+            and re.fullmatch(r"(?:@[A-Za-z0-9._-]+/)?[A-Za-z0-9_-][A-Za-z0-9._-]*", name) is not None
         )
     else:
         valid = isinstance(name, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", name) is not None
@@ -146,22 +146,22 @@ def collect_manifests(root: Path) -> dict:
         if json_error:
             manifests["errors"].append({**json_error, "path": str(path.relative_to(root))})
             continue
-        if "name" in data:
-            name_error = registry_name_error(data["name"], "npm", str(path.relative_to(root)))
-            if name_error:
-                manifests["errors"].append(name_error)
-                continue
-        manifests["npm"].append(
-            {
-                "path": str(path.relative_to(root)),
-                "name": data.get("name"),
-                "description": data.get("description"),
-                "homepage": data.get("homepage"),
-                "repository": data.get("repository"),
-                "keywords": data.get("keywords"),
-                "publishConfig": data.get("publishConfig"),
-            }
+        name_error = (
+            registry_name_error(data["name"], "npm", str(path.relative_to(root))) if "name" in data else None
         )
+        manifest = {
+            "path": str(path.relative_to(root)),
+            "name": data.get("name"),
+            "description": data.get("description"),
+            "homepage": data.get("homepage"),
+            "repository": data.get("repository"),
+            "keywords": data.get("keywords"),
+            "publishConfig": data.get("publishConfig"),
+        }
+        if name_error:
+            manifests["errors"].append(name_error)
+            manifest.update({"status": "error", "reason": name_error["reason"]})
+        manifests["npm"].append(manifest)
 
     cargo = root / "Cargo.toml"
     cargo_data = None
@@ -173,20 +173,19 @@ def collect_manifests(root: Path) -> dict:
     if cargo_data:
         package = cargo_data.get("package", {})
         name_error = registry_name_error(package["name"], "cargo", "Cargo.toml") if "name" in package else None
+        manifests["cargo"] = {
+            "path": "Cargo.toml",
+            "name": package.get("name"),
+            "description": package.get("description"),
+            "homepage": package.get("homepage"),
+            "repository": package.get("repository"),
+            "readme": package.get("readme"),
+            "keywords": package.get("keywords"),
+            "categories": package.get("categories"),
+        }
         if name_error:
             manifests["errors"].append(name_error)
-            manifests["cargo"] = name_error
-        else:
-            manifests["cargo"] = {
-                "path": "Cargo.toml",
-                "name": package.get("name"),
-                "description": package.get("description"),
-                "homepage": package.get("homepage"),
-                "repository": package.get("repository"),
-                "readme": package.get("readme"),
-                "keywords": package.get("keywords"),
-                "categories": package.get("categories"),
-            }
+            manifests["cargo"].update({"status": "error", "reason": name_error["reason"]})
 
     pyproject = root / "pyproject.toml"
     pyproject_data = None
@@ -445,10 +444,16 @@ def main() -> int:
                 names.append(name)
 
     for item in manifests.get("npm", []):
-        if isinstance(item, dict) and item.get("name") and item["name"] not in npm_packages:
+        if (
+            isinstance(item, dict) and item.get("status") != "error"
+            and item.get("name") and item["name"] not in npm_packages
+        ):
             npm_packages.append(item["name"])
     cargo = manifests.get("cargo")
-    if isinstance(cargo, dict) and cargo.get("name") and cargo["name"] not in crate_names:
+    if (
+        isinstance(cargo, dict) and cargo.get("status") != "error"
+        and cargo.get("name") and cargo["name"] not in crate_names
+    ):
         crate_names.append(cargo["name"])
 
     shipwise = {}
