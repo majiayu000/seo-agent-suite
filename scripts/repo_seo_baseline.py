@@ -223,16 +223,28 @@ def infer_homepages(manifests: dict) -> list[str]:
 
 def parse_scalar(value: str) -> object:
     value = value.strip()
+    tag = None
+    # Properties precede scalar content; quoted property/comment characters
+    # remain literal text rather than participating in type classification.
+    while match := re.match(r"(!\S*|&\S+)(?:\s+|$)", value):
+        property_value = match.group(1)
+        if property_value.startswith("!"):
+            tag = property_value
+        value = value[match.end():]
+    if tag is not None and tag not in {"!", "!!str", "!<tag:yaml.org,2002:str>"}:
+        return None
+    quoted = re.fullmatch(r'''("(?:[^"\\]|\\.)*"|'(?:[^']|'')*')(?:\s+#.*)?''', value)
+    if quoted:
+        return quoted.group(1)[1:-1]
+    value = re.split(r"(?:^|\s+)#", value, maxsplit=1)[0].rstrip()
+    if value.startswith(("[", "{")):
+        return [] if value == "[]" else None
+    if tag is not None:
+        return value
     if value in {"[]", ""}:
         return [] if value == "[]" else ""
     if value in {"true", "True", "TRUE", "false", "False", "FALSE"}:
         return value.lower() == "true"
-    if value.startswith('"') and value.endswith('"'):
-        return value[1:-1]
-    # Flow collections are invalid for this gate; classify them without
-    # parsing their contents, while preserving quoted literal strings.
-    if value.startswith(("[", "{")):
-        return None
     if value in {"null", "Null", "NULL", "~"}:
         return None
     # Numeric values are invalid for this gate; classify YAML 1.2 core forms

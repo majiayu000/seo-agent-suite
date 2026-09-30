@@ -207,6 +207,22 @@ discoverability:
             "1e999",
             "-1e999",
             "9" * 4301,
+            "123 # note",
+            "null # note",
+            "true # note",
+            "1e999 # note",
+            "9" * 4301 + " # note",
+            "!!int 123",
+            '!!int "123"',
+            "!!bool true",
+            "!!null null",
+            "!!float 1e999",
+            "!<tag:yaml.org,2002:int> 123",
+            "&value 123",
+            "&value !!int 123 # note",
+            "!!int &value 123 # note",
+            "&value [repo, seo] # note",
+            "!!map {foo: bar} # note",
         ]
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -276,7 +292,7 @@ discoverability:
             issue_dir.mkdir(parents=True)
             (issue_dir / "bug.md").write_text("# Bug\n", encoding="utf-8")
             project_yaml = root / "project.yaml"
-            for value in ["null", "true", "123", "1.5", "+123", "0o17", "0xFF", ".5", "123.", ".inf", "[repo, seo]", "{foo: bar}"]:
+            for value in ["null", "true", "123", "1.5", "+123", "0o17", "0xFF", ".5", "123.", ".inf", "[repo, seo]", "{foo: bar}", "123 # note", "!!int 123", "&value 123", "&value !!int 123 # note", '!!int "123"']:
                 with self.subTest(value=value):
                     project_yaml.write_text(
                         f"""discoverability:
@@ -371,7 +387,7 @@ discoverability:
     - "open-source"
   social_image_set: true
 """
-            for value in ["null", "true", "123", "1.5", "[repo, seo]", "{foo: bar}", "[repo, {foo: bar}]", "{foo: [repo, seo]}"]:
+            for value in ["null", "true", "123", "1.5", "[repo, seo]", "{foo: bar}", "[repo, {foo: bar}]", "{foo: [repo, seo]}", "123 # note", "!!int 123", "&value 123"]:
                 with self.subTest(string=value):
                     project_yaml.write_text(
                         "discoverability:\n"
@@ -386,6 +402,30 @@ discoverability:
                     self.assertEqual(payload["errors"], [])
                     self.assertEqual(payload["shipwise"]["discoverability"]["primary_keyword"], value)
                     self.assertEqual(payload["shipwise"]["discoverability"]["description"], f"A {value} helper")
+            for description, keyword, expected in [
+                ('"A repo # seo helper" # note', '"repo # seo" # note', "A repo # seo helper"),
+                ("'A repo # seo helper' # note", "'repo # seo' # note", "A repo # seo helper"),
+                ('&text "A repo seo helper" # note', '&keyword "repo seo" # note', "A repo seo helper"),
+                ("!!str 123 # note", "!!str 123 # note", "123"),
+                ('!!str &text "A repo seo helper"', '&keyword !!str "repo seo"', "A repo seo helper"),
+                ("!<tag:yaml.org,2002:str> 123", "!<tag:yaml.org,2002:str> 123", "123"),
+                ("! 123", "! 123", "123"),
+                ('"A repo seo helper"', '"repo seo"', "A repo seo helper"),
+            ]:
+                with self.subTest(description=description, keyword=keyword):
+                    project_yaml.write_text(
+                        "discoverability:\n"
+                        + f"  description: {description}\n  primary_keyword: {keyword}\n"
+                        + '  homepage_url: &homepage "https://example.com" # note\n'
+                        + tail,
+                        encoding="utf-8",
+                    )
+                    result = self.run_script("--root", str(root), "--project-yaml", str(project_yaml), "--json")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    payload = json.loads(result.stdout)
+                    self.assertEqual(payload["errors"], [])
+                    self.assertEqual(payload["shipwise"]["discoverability"]["description"], expected)
+                    self.assertEqual(payload["shipwise"]["discoverability"]["homepage_url"], "https://example.com")
             for field in fields:
                 for missing in [True, False]:
                     with self.subTest(field=field, missing=missing):
