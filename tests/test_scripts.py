@@ -174,9 +174,31 @@ discoverability:
             "NULL",
             "~",
             "true",
+            "True",
+            "TRUE",
             "false",
+            "False",
+            "FALSE",
             "123",
             "1.5",
+            "+123",
+            "-123",
+            "0123",
+            "0o17",
+            "0xFF",
+            ".5",
+            "123.",
+            "+12e03",
+            "-2E+05",
+            ".inf",
+            "-.Inf",
+            "+.INF",
+            ".nan",
+            ".NaN",
+            ".NAN",
+            "1e999",
+            "-1e999",
+            "9" * 4301,
         ]
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -210,7 +232,10 @@ discoverability:
                             "--root", str(root), "--project-yaml", str(project_yaml), "--json"
                         )
                         self.assertEqual(result.returncode, 1, result.stderr)
-                        payload = json.loads(result.stdout)
+                        def reject_constant(value):
+                            raise ValueError(f"non-JSON constant: {value}")
+
+                        payload = json.loads(result.stdout, parse_constant=reject_constant)
                         self.assertEqual(payload["status"], "error")
                         check = payload["shipwise"]["checks"][field]
                         self.assertEqual(check["status"], "error")
@@ -243,7 +268,7 @@ discoverability:
             issue_dir.mkdir(parents=True)
             (issue_dir / "bug.md").write_text("# Bug\n", encoding="utf-8")
             project_yaml = root / "project.yaml"
-            for value in ["null", "true", "123", "1.5"]:
+            for value in ["null", "true", "123", "1.5", "+123", "0o17", "0xFF", ".5", "123.", ".inf"]:
                 with self.subTest(value=value):
                     project_yaml.write_text(
                         f"""discoverability:
@@ -276,6 +301,36 @@ discoverability:
                                 self.assertIn("status: error", result.stdout)
                                 self.assertIn("discoverability.description must be a string", result.stdout)
                                 self.assertIn("discoverability.primary_keyword must be a string", result.stdout)
+
+    def test_shipwise_cli_reports_mixed_type_duplicate_topics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_yaml = Path(tmp) / "project.yaml"
+            project_yaml.write_text(
+                """discoverability:
+  description: "A repo seo helper"
+  primary_keyword: "repo seo"
+  homepage_url: "https://example.com"
+  keywords:
+    - "repo seo"
+  topics:
+    - 1
+    - 1
+    - "seo"
+    - "seo"
+    - "github"
+  social_image_set: true
+""",
+                encoding="utf-8",
+            )
+            result = self.run_script("--root", tmp, "--project-yaml", str(project_yaml), "--json")
+            self.assertEqual(result.returncode, 1, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["shipwise"]["checks"]["topics_format"]["status"], "error")
+            self.assertEqual(payload["shipwise"]["checks"]["topics_unique"]["status"], "error")
+            self.assertEqual(
+                {item["check"] for item in payload["errors"] if item["check"].startswith("topics_")},
+                {"topics_format", "topics_unique"},
+            )
 
     def test_shipwise_cli_preserves_string_and_missing_field_checks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

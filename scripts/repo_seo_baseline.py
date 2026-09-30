@@ -225,19 +225,21 @@ def parse_scalar(value: str) -> object:
     value = value.strip()
     if value in {"[]", ""}:
         return [] if value == "[]" else ""
-    if value in {"true", "false"}:
-        return value == "true"
+    if value in {"true", "True", "TRUE", "false", "False", "FALSE"}:
+        return value.lower() == "true"
     if value.startswith('"') and value.endswith('"'):
         return value[1:-1]
     if value in {"null", "Null", "NULL", "~"}:
         return None
-    if value[:1] not in "-0123456789":
-        return value
-    try:
-        number = json.loads(value)
-    except json.JSONDecodeError:
-        return value
-    return number if isinstance(number, (int, float)) else value
+    # Numeric values are invalid for this gate; classify YAML 1.2 core forms
+    # without creating huge integers or non-finite, non-JSON floats.
+    if re.fullmatch(
+        r"[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?"
+        r"|0o[0-7]+|0x[0-9a-fA-F]+|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)",
+        value,
+    ):
+        return None
+    return value
 
 
 def parse_shipwise_discoverability(path: Path) -> dict:
@@ -326,7 +328,7 @@ def evaluate_shipwise_project(root: Path, project_yaml: Path) -> dict:
         item for item in topics
         if not isinstance(item, str) or re.fullmatch(r"[a-z0-9-]{1,50}", item) is None
     ]
-    duplicate_topics = sorted({item for item in topics if topics.count(item) > 1})
+    duplicate_topics = sorted({item for item in topics if topics.count(item) > 1}, key=str)
     repeated_primary = (
         description.lower().count(primary_keyword.lower()) > 1 if primary_keyword and description else False
     )
