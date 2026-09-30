@@ -229,7 +229,15 @@ def parse_scalar(value: str) -> object:
         return value == "true"
     if value.startswith('"') and value.endswith('"'):
         return value[1:-1]
-    return value
+    if value in {"null", "Null", "NULL", "~"}:
+        return None
+    if value[:1] not in "-0123456789":
+        return value
+    try:
+        number = json.loads(value)
+    except json.JSONDecodeError:
+        return value
+    return number if isinstance(number, (int, float)) else value
 
 
 def parse_shipwise_discoverability(path: Path) -> dict:
@@ -294,15 +302,24 @@ def evaluate_shipwise_project(root: Path, project_yaml: Path) -> dict:
     discoverability = parse_shipwise_discoverability(project_yaml)
     topics = discoverability.get("topics")
     keywords = discoverability.get("keywords")
-    homepage = discoverability.get("homepage_url")
-    primary_keyword = str(discoverability.get("primary_keyword") or "").strip()
-    description = str(discoverability.get("description") or "").strip()
+    text_fields = {
+        field: discoverability.get(field, "")
+        for field in ("description", "primary_keyword", "homepage_url")
+    }
+    type_errors = {}
+    for field, value in text_fields.items():
+        if not isinstance(value, str):
+            type_errors[field] = check_item(False, None, f"discoverability.{field} must be a string")
+            text_fields[field] = ""
+    homepage = text_fields["homepage_url"]
+    primary_keyword = text_fields["primary_keyword"].strip()
+    description = text_fields["description"].strip()
 
     if not isinstance(topics, list):
         topics = []
     if not isinstance(keywords, list):
         keywords = []
-    normalized_homepage = normalize_homepage(str(homepage or ""), strict=bool(homepage), label="discoverability.homepage_url")
+    normalized_homepage = normalize_homepage(homepage, strict=bool(homepage), label="discoverability.homepage_url")
     community_files = collect_community_files(root)
 
     invalid_topics = [
@@ -354,6 +371,8 @@ def evaluate_shipwise_project(root: Path, project_yaml: Path) -> dict:
             "support path requires both issue templates and CONTRIBUTING",
         ),
     }
+
+    checks.update(type_errors)
 
     return {
         "project_yaml": str(project_yaml),
