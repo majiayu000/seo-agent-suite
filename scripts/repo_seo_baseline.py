@@ -88,7 +88,7 @@ def normalize_homepage(value: str | None, *, strict: bool = False, label: str = 
         normalized = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", "", ""))
         return normalized.rstrip("/")
     if strict:
-        raise ValueError(f"{label} must be an http(s) URL: {value}")
+        raise ValueError(f"{label} must be an http(s) URL: {public_http.redact_url(value)}")
     return None
 
 
@@ -303,6 +303,12 @@ def evaluate_shipwise_project(root: Path, project_yaml: Path) -> dict:
     if not isinstance(keywords, list):
         keywords = []
     normalized_homepage = normalize_homepage(str(homepage or ""), strict=bool(homepage), label="discoverability.homepage_url")
+    homepage_has_credentials = False
+    if normalized_homepage:
+        parsed_homepage = urllib.parse.urlparse(normalized_homepage)
+        homepage_has_credentials = parsed_homepage.username is not None or parsed_homepage.password is not None
+        normalized_homepage = public_http.redact_url(normalized_homepage)
+        discoverability["homepage_url"] = public_http.redact_url(str(homepage))
     community_files = collect_community_files(root)
 
     invalid_topics = [
@@ -329,7 +335,11 @@ def evaluate_shipwise_project(root: Path, project_yaml: Path) -> dict:
         "topics_count": check_item(5 <= len(topics) <= 20, len(topics), "topics must contain 5 to 20 entries"),
         "topics_format": check_item(not invalid_topics, invalid_topics, "topics must be lowercase hyphenated GitHub topic slugs"),
         "topics_unique": check_item(not duplicate_topics, duplicate_topics, "topics must not contain duplicates"),
-        "homepage_url": check_item(bool(normalized_homepage), normalized_homepage, "missing discoverability.homepage_url"),
+        "homepage_url": check_item(
+            bool(normalized_homepage) and not homepage_has_credentials,
+            normalized_homepage,
+            "URL credentials are not allowed" if homepage_has_credentials else "missing discoverability.homepage_url",
+        ),
         "social_image_set": check_item(
             discoverability.get("social_image_set") is True,
             discoverability.get("social_image_set"),
@@ -424,6 +434,18 @@ def main() -> int:
         except ValueError as exc:
             parser.error(str(exc))
 
+    for item in [*manifests.get("npm", []), manifests.get("cargo")]:
+        if isinstance(item, dict) and isinstance(item.get("homepage"), str):
+            item["homepage"] = public_http.redact_url(item["homepage"])
+
+    site = {}
+    for homepage in homepages:
+        safe_homepage = public_http.redact_url(homepage)
+        checks = site_resource_checks(homepage)
+        # Redacted URLs can coincide; a passing duplicate must not hide a failure.
+        if safe_homepage not in site or checks["homepage"]["status"] == "error":
+            site[safe_homepage] = checks
+
     evidence = {
         "root": str(root),
         "git": {
@@ -446,10 +468,7 @@ def main() -> int:
             "npm": {pkg: run_cmd(["npm", "view", pkg, "--json"], cwd=root) for pkg in npm_packages},
             "crates": {crate: run_cmd(["cargo", "search", crate, "--limit", "3"], cwd=root) for crate in crate_names},
         },
-        "site": {
-            homepage: site_resource_checks(homepage)
-            for homepage in homepages
-        },
+        "site": site,
         "community_files": collect_community_files(root),
         "shipwise": shipwise,
     }
@@ -463,7 +482,7 @@ def main() -> int:
         print(f"root: {root}")
         print(f"npm packages: {', '.join(npm_packages) or 'none'}")
         print(f"crates: {', '.join(crate_names) or 'none'}")
-        print(f"homepages: {', '.join(homepages) or 'none'}")
+        print(f"homepages: {', '.join(site) or 'none'}")
         sys.stdout.write(f"status: {evidence['status']}\n")
         if errors:
             sys.stdout.write("errors:\n")

@@ -48,6 +48,133 @@ class RepoSeoBaselineTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must be an http(s) URL", result.stderr)
 
+    def test_cli_homepage_credentials_are_redacted_and_still_fail(self) -> None:
+        for authority in ("example.invalid:8443", "[2001:db8::1]:8443"):
+            for output_args in ((), ("--json",)):
+                with self.subTest(authority=authority, output_args=output_args), tempfile.TemporaryDirectory() as tmp:
+                    result = self.run_script(
+                        "--root", tmp, "--homepage",
+                        f"https://dummy-user:dummy-password@{authority}/docs/?view=full#section",
+                        *output_args,
+                    )
+
+                self.assertEqual(result.returncode, 1)
+                self.assertNotIn("dummy-user", result.stdout + result.stderr)
+                self.assertNotIn("dummy-password", result.stdout + result.stderr)
+                self.assertIn("URL credentials are not allowed", result.stdout)
+                if output_args:
+                    payload = json.loads(result.stdout)
+                    self.assertEqual(payload["status"], "error")
+                    self.assertEqual(list(payload["site"]), [f"https://{authority}/docs"])
+
+    def test_manifest_homepage_credentials_are_redacted_before_output(self) -> None:
+        module = load_script("repo_seo_baseline.py")
+        for manifest in ("package.json", "Cargo.toml"):
+            with self.subTest(manifest=manifest), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                homepage = "https://dummy-user:dummy-password@example.invalid/docs"
+                content = (
+                    json.dumps({"homepage": homepage}) if manifest == "package.json"
+                    else f'[package]\nhomepage = "{homepage}"\n'
+                )
+                (root / manifest).write_text(content, encoding="utf-8")
+                stdout = io.StringIO()
+                with (
+                    mock.patch.object(sys, "argv", ["repo_seo_baseline.py", "--root", tmp, "--json"]),
+                    mock.patch.object(sys, "stdout", stdout),
+                    mock.patch.object(module, "run_cmd", return_value={"status": "skipped"}),
+                    mock.patch.object(module.public_http.socket, "getaddrinfo") as resolve,
+                    mock.patch.object(module.public_http, "connect_endpoint") as connect,
+                ):
+                    code = module.main()
+
+            self.assertEqual(code, 1)
+            self.assertNotIn("dummy-user", stdout.getvalue())
+            self.assertNotIn("dummy-password", stdout.getvalue())
+            payload = json.loads(stdout.getvalue())
+            item = payload["manifests"]["npm"][0] if manifest == "package.json" else payload["manifests"]["cargo"]
+            self.assertEqual(item["homepage"], "https://example.invalid/docs")
+            self.assertEqual(payload["site"]["https://example.invalid/docs"]["homepage"]["status"], "error")
+            resolve.assert_not_called()
+            connect.assert_not_called()
+
+    def test_shipwise_homepage_credentials_fail_without_leaking_evidence(self) -> None:
+        module = load_script("repo_seo_baseline.py")
+        for userinfo in ("dummy-user:dummy-password", "dummy-user", ":dummy-password", ""):
+            with self.subTest(userinfo=userinfo), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                for name in ("README.md", "LICENSE", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SECURITY.md"):
+                    (root / name).write_text("ok\n", encoding="utf-8")
+                issue_dir = root / ".github" / "ISSUE_TEMPLATE"
+                issue_dir.mkdir(parents=True)
+                (issue_dir / "bug.md").write_text("ok\n", encoding="utf-8")
+                project_yaml = root / "project.yaml"
+                project_yaml.write_text(
+                    'discoverability:\n'
+                    '  description: "A repo seo helper"\n'
+                    '  primary_keyword: "repo seo"\n'
+                    '  keywords:\n    - "repo seo"\n'
+                    '  topics:\n    - "seo"\n    - "github"\n    - "developer-tools"\n    - "metadata"\n    - "open-source"\n'
+                    f'  homepage_url: "https://{userinfo}@example.invalid/docs"\n'
+                    '  social_image_set: true\n',
+                    encoding="utf-8",
+                )
+                evidence = module.evaluate_shipwise_project(root, project_yaml)
+                serialized = json.dumps(evidence)
+                result = self.run_script("--root", tmp, "--project-yaml", str(project_yaml), "--json")
+
+            self.assertEqual(result.returncode, 1)
+            payload = json.loads(result.stdout)
+            self.assertEqual(evidence["checks"]["homepage_url"]["status"], "error")
+            self.assertIn("credentials", evidence["checks"]["homepage_url"]["reason"])
+            self.assertEqual(evidence["checks"]["homepage_url"]["evidence"], "https://example.invalid/docs")
+            self.assertEqual(evidence["discoverability"]["homepage_url"], "https://example.invalid/docs")
+            self.assertEqual([key for key, value in evidence["checks"].items() if value["status"] == "error"], ["homepage_url"])
+            self.assertEqual(payload["errors"][0]["check"], "homepage_url")
+            self.assertNotIn("dummy-user", serialized + result.stdout + result.stderr)
+            self.assertNotIn("dummy-password", serialized + result.stdout + result.stderr)
+
+    def test_redacted_homepage_collision_preserves_credential_error(self) -> None:
+        module = load_script("repo_seo_baseline.py")
+
+        def request_once(url, *_args, **_kwargs):
+            module.validate_public_http_url(url)
+            return {"http_status": 200, "location": None, "content_type": "text/plain", "sample_bytes": 0, "body": b""}
+
+        for homepages in (
+            ["https://dummy-user:dummy-password@example.invalid/docs", "https://example.invalid/docs"],
+            ["https://example.invalid/docs", "https://dummy-user:dummy-password@example.invalid/docs"],
+        ):
+            with self.subTest(homepages=homepages), tempfile.TemporaryDirectory() as tmp:
+                stdout = io.StringIO()
+                argv = ["repo_seo_baseline.py", "--root", tmp, "--json"]
+                for homepage in homepages:
+                    argv.extend(["--homepage", homepage])
+                with (
+                    mock.patch.object(sys, "argv", argv),
+                    mock.patch.object(sys, "stdout", stdout),
+                    mock.patch.object(module, "run_cmd", return_value={"status": "skipped"}),
+                    mock.patch.object(module.public_http.socket, "getaddrinfo", return_value=[
+                        (module.public_http.socket.AF_INET, module.public_http.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+                    ]),
+                    mock.patch.object(module.public_http, "request_public_url_once", side_effect=request_once) as request,
+                ):
+                    code = module.main()
+
+            self.assertEqual(code, 1)
+            self.assertNotIn("dummy-password", stdout.getvalue())
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["site"]["https://example.invalid/docs"]["homepage"]["status"], "error")
+            self.assertEqual(request.call_count, 6)
+
+    def test_invalid_homepage_scheme_diagnostic_redacts_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_script("--root", tmp, "--homepage", "ftp://dummy-user:dummy-password@example.invalid/docs")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("must be an http(s) URL", result.stderr)
+        self.assertNotIn("dummy-user", result.stderr)
+        self.assertNotIn("dummy-password", result.stderr)
+
     def test_toml_unavailable_is_marked_as_error(self) -> None:
         module = load_script("repo_seo_baseline.py")
         with tempfile.TemporaryDirectory() as tmp:
