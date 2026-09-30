@@ -101,7 +101,8 @@ def resource_candidates(base_url: str, filename: str) -> list[str]:
     project_relative = urllib.parse.urlunparse(
         (parsed.scheme, parsed.netloc, parsed.path.rstrip("/") + "/" + filename, "", "", "")
     )
-    return list(dict.fromkeys([origin_relative, project_relative]))
+    page_relative = urllib.parse.urljoin(base_url, filename)
+    return list(dict.fromkeys([origin_relative, page_relative, project_relative]))
 
 
 def check_candidates(base_url: str, filename: str) -> list[dict]:
@@ -126,8 +127,16 @@ def resource_present(item: dict, filename: str) -> tuple[bool, str]:
         return False, "looks like HTML, not a crawl resource"
     if filename == "sitemap.xml":
         try:
-            root = ElementTree.fromstring(body)
+            # Fetch returns a bounded sample; do not require its closing root or EOF.
+            parser = ElementTree.XMLPullParser(events=("start",))
+            parser.feed(body)
+            root = None
+            for _, element in parser.read_events():
+                if root is None:
+                    root = element
         except ElementTree.ParseError:
+            return False, "invalid sitemap XML"
+        if root is None:
             return False, "invalid sitemap XML"
         if root.tag.rsplit("}", 1)[-1] not in {"urlset", "sitemapindex"}:
             return False, "missing sitemap XML root"
