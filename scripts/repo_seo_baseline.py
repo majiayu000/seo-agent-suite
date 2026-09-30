@@ -229,6 +229,10 @@ def parse_scalar(value: str) -> object:
         return value.lower() == "true"
     if value.startswith('"') and value.endswith('"'):
         return value[1:-1]
+    # Flow collections are invalid for this gate; classify them without
+    # parsing their contents, while preserving quoted literal strings.
+    if value.startswith(("[", "{")):
+        return None
     if value in {"null", "Null", "NULL", "~"}:
         return None
     # Numeric values are invalid for this gate; classify YAML 1.2 core forms

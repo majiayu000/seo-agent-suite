@@ -169,6 +169,14 @@ discoverability:
         invalid_values = [
             '\n    - "A repo seo helper"',
             "[]",
+            "[repo, seo]",
+            '["repo", "seo"]',
+            "[ repo, seo ]",
+            "[repo, {foo: bar}]",
+            "{}",
+            "{foo: bar}",
+            "{foo:bar}",
+            "{foo: [repo, seo]}",
             "null",
             "Null",
             "NULL",
@@ -268,7 +276,7 @@ discoverability:
             issue_dir.mkdir(parents=True)
             (issue_dir / "bug.md").write_text("# Bug\n", encoding="utf-8")
             project_yaml = root / "project.yaml"
-            for value in ["null", "true", "123", "1.5", "+123", "0o17", "0xFF", ".5", "123.", ".inf"]:
+            for value in ["null", "true", "123", "1.5", "+123", "0o17", "0xFF", ".5", "123.", ".inf", "[repo, seo]", "{foo: bar}"]:
                 with self.subTest(value=value):
                     project_yaml.write_text(
                         f"""discoverability:
@@ -296,7 +304,14 @@ discoverability:
                                 payload = json.loads(result.stdout)
                                 self.assertEqual(payload["status"], "error")
                                 for field in ["description", "primary_keyword"]:
-                                    self.assertEqual(payload["shipwise"]["checks"][field]["status"], "error")
+                                    self.assertEqual(
+                                        payload["shipwise"]["checks"][field],
+                                        {
+                                            "status": "error",
+                                            "evidence": None,
+                                            "reason": f"discoverability.{field} must be a string",
+                                        },
+                                    )
                             else:
                                 self.assertIn("status: error", result.stdout)
                                 self.assertIn("discoverability.description must be a string", result.stdout)
@@ -356,7 +371,7 @@ discoverability:
     - "open-source"
   social_image_set: true
 """
-            for value in ["null", "true", "123", "1.5"]:
+            for value in ["null", "true", "123", "1.5", "[repo, seo]", "{foo: bar}", "[repo, {foo: bar}]", "{foo: [repo, seo]}"]:
                 with self.subTest(string=value):
                     project_yaml.write_text(
                         "discoverability:\n"
@@ -367,7 +382,10 @@ discoverability:
                     )
                     result = self.run_script("--root", str(root), "--project-yaml", str(project_yaml), "--json")
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(json.loads(result.stdout)["errors"], [])
+                    payload = json.loads(result.stdout)
+                    self.assertEqual(payload["errors"], [])
+                    self.assertEqual(payload["shipwise"]["discoverability"]["primary_keyword"], value)
+                    self.assertEqual(payload["shipwise"]["discoverability"]["description"], f"A {value} helper")
             for field in fields:
                 for missing in [True, False]:
                     with self.subTest(field=field, missing=missing):
