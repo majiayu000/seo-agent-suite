@@ -114,7 +114,8 @@ def site_resource_checks(homepage: str) -> dict:
     checks = {"homepage": http_check(homepage)}
     if should_check_site_resources(homepage):
         for resource, filename in (("robots", "robots.txt"), ("sitemap", "sitemap.xml")):
-            item = check_candidates(homepage, filename)[0]
+            candidates = check_candidates(homepage, filename)
+            item = next((candidate for candidate in candidates if candidate["present"]), candidates[0])
             if not item["present"]:
                 item["status"] = "error"
             checks[resource] = item

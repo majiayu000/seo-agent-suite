@@ -865,7 +865,72 @@ class OriginResourceTests(unittest.TestCase):
                     code = module.main()
             return code, json.loads(stdout.getvalue())
 
-    def test_docs_files_do_not_replace_missing_origin_resources(self):
+    def test_sitemap_presence_requires_a_parsed_sitemap_root(self):
+        namespace = "http://www.sitemaps.org/schemas/sitemap/0.9"
+        bodies = (
+            (f'<sm:urlset xmlns:sm="{namespace}"><sm:url><sm:loc>https://example.com/</sm:loc></sm:url></sm:urlset>', True),
+            (f'<sm:sitemapindex xmlns:sm="{namespace}"/>', True),
+            (f'<?xml version="1.0"?>' + "<!-- preamble -->" * 80 + f'<urlset xmlns="{namespace}"/>', True),
+            ("not XML, but mentions <urlset></urlset>", False),
+            ("<urlset><url></urlset>", False),
+            ("<error><urlset/></error>", False),
+            ("<!-- <urlset/> --><error/>", False),
+            ("<urlset_fake/>", False),
+        )
+        for body, present in bodies:
+            for name in ("repo_seo_baseline.py", "site_meta_audit.py"):
+                routes = {
+                    "/robots.txt": (200, "text/plain", "User-agent: *\nDisallow:\n"),
+                    "/sitemap.xml": (200, "application/xml", body),
+                }
+                with self.subTest(body=body[:80], script=name), self.http_site(routes) as (origin, paths, port):
+                    code, payload = self.run_audit(name, origin, port)
+                    if name == "repo_seo_baseline.py":
+                        self.assertEqual(code, 0 if present else 1)
+                        item = payload["site"][origin]["sitemap"]
+                        self.assertEqual(item["status"], "ok" if present else "error")
+                        self.assertEqual(payload["status"], "ok" if present else "error")
+                        self.assertEqual({error["resource"] for error in payload["errors"]}, set() if present else {"sitemap"})
+                    else:
+                        self.assertEqual(code, 0)
+                        self.assertEqual(payload["checks"]["has_sitemap_xml"], present)
+                        item = payload["checks"]["sitemap_xml"][0]
+                    self.assertEqual(item["present"], present)
+                    self.assertNotIn("body", item)
+                    if not present:
+                        self.assertTrue(item["reason"])
+                    self.assertEqual(paths, ["/", "/robots.txt", "/sitemap.xml"])
+
+    def test_project_sitemap_can_succeed_after_an_invalid_origin_candidate(self):
+        for path in ("/project/", "/project"):
+            for root_sitemap in (
+                (404, "text/plain", "missing"),
+                (200, "text/html", "<html>missing</html>"),
+                (200, "application/xml", "<error/>"),
+            ):
+                for name in ("repo_seo_baseline.py", "site_meta_audit.py"):
+                    routes = {
+                        "/robots.txt": (200, "text/plain", "User-agent: *\nDisallow:\n"),
+                        "/sitemap.xml": root_sitemap,
+                        "/project/sitemap.xml": (200, "application/xml", "<urlset/>"),
+                    }
+                    with self.subTest(path=path, root_sitemap=root_sitemap, script=name), self.http_site(routes) as (origin, paths, port):
+                        code, payload = self.run_audit(name, origin + path, port)
+                        self.assertEqual(code, 0)
+                        if name == "repo_seo_baseline.py":
+                            item = payload["site"][origin + path.rstrip("/")]["sitemap"]
+                            self.assertEqual(payload["errors"], [])
+                            self.assertEqual(item["status"], "ok")
+                        else:
+                            self.assertTrue(payload["checks"]["has_sitemap_xml"])
+                            first, item = payload["checks"]["sitemap_xml"]
+                            self.assertFalse(first["present"])
+                        self.assertTrue(item["present"])
+                        self.assertEqual(item["url"], origin + "/project/sitemap.xml")
+                        expected_page = path.rstrip("/") if name == "repo_seo_baseline.py" else path
+                        self.assertEqual(paths, [expected_page, "/robots.txt", "/sitemap.xml", "/project/sitemap.xml"])
+
+    def test_docs_sitemap_is_valid_but_docs_robots_cannot_replace_origin_robots(self):
         routes = {
             "/robots.txt": (404, "text/plain", "missing"),
             "/sitemap.xml": (404, "text/plain", "missing"),
@@ -877,12 +942,14 @@ class OriginResourceTests(unittest.TestCase):
                 code, payload = self.run_audit(name, origin + "/docs/", port)
                 if name == "repo_seo_baseline.py":
                     self.assertEqual(code, 1)
-                    self.assertEqual({item["resource"] for item in payload["errors"]}, {"robots", "sitemap"})
+                    self.assertEqual({item["resource"] for item in payload["errors"]}, {"robots"})
+                    self.assertEqual(payload["site"][origin + "/docs"]["sitemap"]["url"], origin + "/docs/sitemap.xml")
                 else:
                     self.assertEqual(code, 0)  # Metadata CLI keeps its existing page-status exit contract.
                     self.assertFalse(payload["checks"]["has_robots_txt"])
-                    self.assertFalse(payload["checks"]["has_sitemap_xml"])
-                self.assertEqual(paths, ["/docs", "/robots.txt", "/sitemap.xml"] if name == "repo_seo_baseline.py" else ["/docs/", "/robots.txt", "/sitemap.xml"])
+                    self.assertTrue(payload["checks"]["has_sitemap_xml"])
+                expected_page = "/docs" if name == "repo_seo_baseline.py" else "/docs/"
+                self.assertEqual(paths, [expected_page, "/robots.txt", "/sitemap.xml", "/docs/sitemap.xml"])
 
     def test_origin_resources_pass_for_docs_and_pathless_homepages(self):
         routes = {
@@ -903,9 +970,12 @@ class OriginResourceTests(unittest.TestCase):
                         self.assertTrue(checks["has_robots_txt"])
                         self.assertTrue(checks["has_sitemap_xml"])
                         self.assertEqual(len(checks["robots_txt"]), 1)
-                        self.assertEqual(len(checks["sitemap_xml"]), 1)
+                        self.assertEqual(len(checks["sitemap_xml"]), 2 if path else 1)
                     expected_page = path.rstrip("/") or "/" if name == "repo_seo_baseline.py" else path or "/"
-                    self.assertEqual(paths, [expected_page, "/robots.txt", "/sitemap.xml"])
+                    expected_paths = [expected_page, "/robots.txt", "/sitemap.xml"]
+                    if path:
+                        expected_paths.append("/docs/sitemap.xml")
+                    self.assertEqual(paths, expected_paths)
 
     def test_soft_404_and_non_sitemap_xml_fail_baseline_gate(self):
         for robots, sitemap in (
@@ -925,7 +995,7 @@ class OriginResourceTests(unittest.TestCase):
                     self.assertNotIn("body", checks[resource])
                 self.assertEqual({item["resource"] for item in payload["errors"]}, {"robots", "sitemap"})
 
-    def test_origin_candidates_keep_scheme_authority_and_drop_page_components(self):
+    def test_resource_candidates_keep_authority_and_drop_query_and_fragment(self):
         module = load_script("site_meta_audit.py")
         for homepage, origin in (
             ("https://example.com", "https://example.com"),
@@ -935,7 +1005,11 @@ class OriginResourceTests(unittest.TestCase):
         ):
             for filename in ("robots.txt", "sitemap.xml"):
                 with self.subTest(homepage=homepage, filename=filename):
-                    self.assertEqual(module.resource_candidates(homepage, filename), [origin + "/" + filename])
+                    expected = [origin + "/" + filename]
+                    if filename == "sitemap.xml" and "/docs" in homepage:
+                        path = "/docs/page" if "page?" in homepage else "/docs"
+                        expected.append(origin + path + "/sitemap.xml")
+                    self.assertEqual(module.resource_candidates(homepage, filename), expected)
 
     def test_origin_resource_fetches_preserve_public_url_validation(self):
         for name in ("repo_seo_baseline.py", "site_meta_audit.py"):

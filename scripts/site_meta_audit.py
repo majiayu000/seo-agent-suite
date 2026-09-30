@@ -9,6 +9,7 @@ import sys
 import urllib.parse
 from html.parser import HTMLParser
 from pathlib import Path
+from xml.etree import ElementTree
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
@@ -94,7 +95,13 @@ def first_link(parser: MetaParser, rel: str) -> str | None:
 
 def resource_candidates(base_url: str, filename: str) -> list[str]:
     parsed = urllib.parse.urlparse(base_url)
-    return [urllib.parse.urlunparse((parsed.scheme, parsed.netloc, "/" + filename, "", "", ""))]
+    origin_relative = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, "/" + filename, "", "", ""))
+    if filename != "sitemap.xml":
+        return [origin_relative]
+    project_relative = urllib.parse.urlunparse(
+        (parsed.scheme, parsed.netloc, parsed.path.rstrip("/") + "/" + filename, "", "", "")
+    )
+    return list(dict.fromkeys([origin_relative, project_relative]))
 
 
 def check_candidates(base_url: str, filename: str) -> list[dict]:
@@ -117,8 +124,13 @@ def resource_present(item: dict, filename: str) -> tuple[bool, str]:
     content_type = str(item.get("content_type") or "").lower()
     if "<html" in body[:500].lower() or "text/html" in content_type:
         return False, "looks like HTML, not a crawl resource"
-    if filename == "sitemap.xml" and "<urlset" not in body[:1000] and "<sitemapindex" not in body[:1000]:
-        return False, "missing sitemap XML root"
+    if filename == "sitemap.xml":
+        try:
+            root = ElementTree.fromstring(body)
+        except ElementTree.ParseError:
+            return False, "invalid sitemap XML"
+        if root.tag.rsplit("}", 1)[-1] not in {"urlset", "sitemapindex"}:
+            return False, "missing sitemap XML root"
     return True, ""
 
 
