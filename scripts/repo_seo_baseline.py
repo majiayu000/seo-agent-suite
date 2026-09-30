@@ -126,7 +126,7 @@ def registry_name_error(name: object, registry: str, path: str) -> dict | None:
         valid = (
             isinstance(name, str)
             and len(name) <= 214
-            and not name.startswith(("-", ".", "_"))
+            and not name.startswith((".", "_"))
             and re.fullmatch(r"(?:@[a-z0-9._-]+/)?[a-z0-9._-]+", name) is not None
         )
     else:

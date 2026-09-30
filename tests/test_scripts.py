@@ -840,7 +840,7 @@ class RegistryPackageNameTests(unittest.TestCase):
     def test_invalid_manifest_name_types_and_syntax_fail_without_registry_calls(self) -> None:
         invalid_npm = [
             1, 0, True, False, None, ["demo"], {"name": "demo"}, "", " demo", "demo ",
-            "demo\n", "-demo", ".demo", "_demo", "UpperCase", "demo@1", "https://example.com",
+            "demo\n", ".demo", "_demo", "UpperCase", "demo@1", "https://example.com",
             "@scope/", "scope/demo", "@scope/demo/extra", "démø", "a" * 215,
         ]
         invalid_cargo = [
@@ -891,7 +891,7 @@ class RegistryPackageNameTests(unittest.TestCase):
                     self.assertIn("package name", output)
 
     def test_valid_names_are_deduplicated_and_passed_as_operands(self) -> None:
-        npm_names = ["demo", "@scope/demo", "demo.js", "demo_name", "214" + "a" * 211]
+        npm_names = ["demo", "@scope/demo", "demo.js", "demo_name", "-foo", "--registry", "214" + "a" * 211]
         cargo_names = ["demo-crate", "Demo_crate", "a" * 64]
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
