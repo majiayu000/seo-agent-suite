@@ -9,7 +9,10 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
@@ -797,6 +800,169 @@ discoverability:
 
         self.assertEqual(errors[0]["resource"], "robots")
         self.assertEqual(errors[0]["reason"], "redirect blocked")
+
+
+class OriginResourceTests(unittest.TestCase):
+    @contextmanager
+    def http_site(self, routes):
+        paths = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                paths.append(self.path)
+                status, content_type, body = routes.get(
+                    self.path, (200, "text/html", "<html><title>Not found</title></html>")
+                )
+                payload = body.encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield f"http://crawl.example:{server.server_port}", paths, server.server_port
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def run_audit(self, name, homepage, port):
+        module = load_script(name)
+        shared = public_http_mod(module)
+        public_answer = [
+            (shared.socket.AF_INET, shared.socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ]
+
+        def connect_local(endpoint, timeout):
+            connection = shared.socket.socket(endpoint[0], endpoint[1], endpoint[2])
+            connection.settimeout(timeout)
+            connection.connect(("127.0.0.1", port))
+            return connection
+
+        with tempfile.TemporaryDirectory() as root:
+            args = [name, homepage, "--json"] if name == "site_meta_audit.py" else [
+                name, "--root", root, "--homepage", homepage, "--json"
+            ]
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(shared.socket, "getaddrinfo", return_value=public_answer),
+                mock.patch.object(shared, "connect_endpoint", side_effect=connect_local),
+                mock.patch.object(shared, "select_proxy", return_value=None),
+                mock.patch.object(sys, "argv", args),
+                mock.patch.object(sys, "stdout", stdout),
+            ):
+                if name == "repo_seo_baseline.py":
+                    with mock.patch.object(module, "run_cmd", return_value={"status": "ok"}):
+                        code = module.main()
+                else:
+                    code = module.main()
+            return code, json.loads(stdout.getvalue())
+
+    def test_docs_files_do_not_replace_missing_origin_resources(self):
+        routes = {
+            "/robots.txt": (404, "text/plain", "missing"),
+            "/sitemap.xml": (404, "text/plain", "missing"),
+            "/docs/robots.txt": (200, "text/plain", "User-agent: *\nDisallow:\n"),
+            "/docs/sitemap.xml": (200, "application/xml", "<urlset></urlset>"),
+        }
+        for name in ("repo_seo_baseline.py", "site_meta_audit.py"):
+            with self.subTest(script=name), self.http_site(routes) as (origin, paths, port):
+                code, payload = self.run_audit(name, origin + "/docs/", port)
+                if name == "repo_seo_baseline.py":
+                    self.assertEqual(code, 1)
+                    self.assertEqual({item["resource"] for item in payload["errors"]}, {"robots", "sitemap"})
+                else:
+                    self.assertEqual(code, 0)  # Metadata CLI keeps its existing page-status exit contract.
+                    self.assertFalse(payload["checks"]["has_robots_txt"])
+                    self.assertFalse(payload["checks"]["has_sitemap_xml"])
+                self.assertEqual(paths, ["/docs", "/robots.txt", "/sitemap.xml"] if name == "repo_seo_baseline.py" else ["/docs/", "/robots.txt", "/sitemap.xml"])
+
+    def test_origin_resources_pass_for_docs_and_pathless_homepages(self):
+        routes = {
+            "/robots.txt": (200, "text/plain", "User-agent: *\nDisallow:\n"),
+            "/sitemap.xml": (200, "application/xml", '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></sitemapindex>'),
+        }
+        for name in ("repo_seo_baseline.py", "site_meta_audit.py"):
+            for path in ("/docs/", ""):
+                with self.subTest(script=name, path=path), self.http_site(routes) as (origin, paths, port):
+                    code, payload = self.run_audit(name, origin + path, port)
+                    self.assertEqual(code, 0)
+                    if name == "repo_seo_baseline.py":
+                        checks = payload["site"][origin + path.rstrip("/")]
+                        self.assertEqual(checks["robots"]["status"], "ok")
+                        self.assertEqual(checks["sitemap"]["status"], "ok")
+                    else:
+                        checks = payload["checks"]
+                        self.assertTrue(checks["has_robots_txt"])
+                        self.assertTrue(checks["has_sitemap_xml"])
+                        self.assertEqual(len(checks["robots_txt"]), 1)
+                        self.assertEqual(len(checks["sitemap_xml"]), 1)
+                    expected_page = path.rstrip("/") or "/" if name == "repo_seo_baseline.py" else path or "/"
+                    self.assertEqual(paths, [expected_page, "/robots.txt", "/sitemap.xml"])
+
+    def test_soft_404_and_non_sitemap_xml_fail_baseline_gate(self):
+        for robots, sitemap in (
+            ((200, "text/html", "<html>missing</html>"), (200, "text/html", "<html>missing</html>")),
+            ((200, "text/plain", "<html>missing</html>"), (200, "application/xml", "<error>missing</error>")),
+            ((204, "text/plain", ""), (204, "application/xml", "")),
+        ):
+            routes = {"/robots.txt": robots, "/sitemap.xml": sitemap}
+            with self.subTest(robots=robots, sitemap=sitemap), self.http_site(routes) as (origin, paths, port):
+                code, payload = self.run_audit("repo_seo_baseline.py", origin, port)
+                self.assertEqual(code, 1)
+                checks = payload["site"][origin]
+                for resource in ("robots", "sitemap"):
+                    self.assertEqual(checks[resource]["status"], "error")
+                    self.assertFalse(checks[resource]["present"])
+                    self.assertTrue(checks[resource]["reason"])
+                    self.assertNotIn("body", checks[resource])
+                self.assertEqual({item["resource"] for item in payload["errors"]}, {"robots", "sitemap"})
+
+    def test_origin_candidates_keep_scheme_authority_and_drop_page_components(self):
+        module = load_script("site_meta_audit.py")
+        for homepage, origin in (
+            ("https://example.com", "https://example.com"),
+            ("https://example.com/docs/page?lang=en#intro", "https://example.com"),
+            ("http://example.com:8080/docs/", "http://example.com:8080"),
+            ("https://[2606:4700:4700::1111]:8443/docs/", "https://[2606:4700:4700::1111]:8443"),
+        ):
+            for filename in ("robots.txt", "sitemap.xml"):
+                with self.subTest(homepage=homepage, filename=filename):
+                    self.assertEqual(module.resource_candidates(homepage, filename), [origin + "/" + filename])
+
+    def test_origin_resource_fetches_preserve_public_url_validation(self):
+        for name in ("repo_seo_baseline.py", "site_meta_audit.py"):
+            module = load_script(name)
+            shared = public_http_mod(module)
+            private_answer = [
+                (shared.socket.AF_INET, shared.socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))
+            ]
+            for homepage, reason in (
+                ("http://private.example/docs/", "non-public"),
+                ("http://dummy:dummy@public.example/docs/", "credentials"),
+            ):
+                with (
+                    self.subTest(script=name, homepage=homepage),
+                    mock.patch.object(shared.socket, "getaddrinfo", return_value=private_answer) as dns,
+                    mock.patch.object(shared, "connect_endpoint") as connect,
+                ):
+                    items = module.site_resource_checks(homepage).values() if name == "repo_seo_baseline.py" else (
+                        module.check_candidates(homepage, "robots.txt") + module.check_candidates(homepage, "sitemap.xml")
+                    )
+                    for item in items:
+                        self.assertEqual(item["status"], "error")
+                        self.assertIn(reason, item["reason"])
+                        self.assertNotIn("body", item)
+                    connect.assert_not_called()
+                    if reason == "credentials":
+                        dns.assert_not_called()
 
 
 class SiteMetaAuditTests(unittest.TestCase):

@@ -25,6 +25,7 @@ from public_http import (  # noqa: E402
     request_public_url_once,
     validate_public_http_url,
 )
+from site_meta_audit import check_candidates  # noqa: E402
 
 try:
     import tomllib
@@ -112,8 +113,11 @@ def should_check_site_resources(url: str) -> bool:
 def site_resource_checks(homepage: str) -> dict:
     checks = {"homepage": http_check(homepage)}
     if should_check_site_resources(homepage):
-        checks["robots"] = http_check(homepage.rstrip("/") + "/robots.txt")
-        checks["sitemap"] = http_check(homepage.rstrip("/") + "/sitemap.xml")
+        for resource, filename in (("robots", "robots.txt"), ("sitemap", "sitemap.xml")):
+            item = check_candidates(homepage, filename)[0]
+            if not item["present"]:
+                item["status"] = "error"
+            checks[resource] = item
     else:
         skipped = {"status": "skipped", "reason": "registry or source-host URL, not a project site"}
         checks["robots"] = skipped

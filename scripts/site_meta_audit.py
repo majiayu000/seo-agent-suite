@@ -94,10 +94,7 @@ def first_link(parser: MetaParser, rel: str) -> str | None:
 
 def resource_candidates(base_url: str, filename: str) -> list[str]:
     parsed = urllib.parse.urlparse(base_url)
-    origin = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
-    page_relative = urllib.parse.urljoin(base_url if base_url.endswith("/") else base_url.rsplit("/", 1)[0] + "/", filename)
-    origin_relative = origin.rstrip("/") + "/" + filename
-    return list(dict.fromkeys([page_relative, origin_relative]))
+    return [urllib.parse.urlunparse((parsed.scheme, parsed.netloc, "/" + filename, "", "", ""))]
 
 
 def check_candidates(base_url: str, filename: str) -> list[dict]:
