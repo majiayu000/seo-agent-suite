@@ -873,6 +873,8 @@ class OriginResourceTests(unittest.TestCase):
             (f'<?xml version="1.0"?>' + "<!-- preamble -->" * 80 + f'<urlset xmlns="{namespace}"/>', True),
             ("not XML, but mentions <urlset></urlset>", False),
             ("<urlset><url></urlset>", False),
+            ("<urlset>", False),
+            ("<urlset><url>", False),
             ("<error><urlset/></error>", False),
             ("<!-- <urlset/> --><error/>", False),
             ("<urlset_fake/>", False),
@@ -923,6 +925,33 @@ class OriginResourceTests(unittest.TestCase):
                         self.assertTrue(payload["checks"]["has_sitemap_xml"])
                         item = payload["checks"]["sitemap_xml"][0]
                     self.assertTrue(item["present"])
+                    self.assertNotIn("body", item)
+                    self.assertEqual(paths, ["/", "/robots.txt", "/sitemap.xml"])
+
+    def test_sitemap_byte_limit_distinguishes_eof_from_truncation(self):
+        for size, closing, present in (
+            (999_999, "</urlset>", True),
+            (1_000_000, "</urlset>", True),
+            (1_000_001, "</urlset>", True),
+            (1_000_000, "", False),
+        ):
+            body = "<urlset>" + " " * (size - len("<urlset>" + closing)) + closing
+            routes = {
+                "/robots.txt": (200, "text/plain", "User-agent: *\nDisallow:\n"),
+                "/sitemap.xml": (200, "application/xml", body),
+            }
+            for name in ("repo_seo_baseline.py", "site_meta_audit.py"):
+                with self.subTest(size=size, present=present, script=name), self.http_site(routes) as (origin, paths, port):
+                    code, payload = self.run_audit(name, origin, port)
+                    if name == "repo_seo_baseline.py":
+                        self.assertEqual(code, 0 if present else 1)
+                        item = payload["site"][origin]["sitemap"]
+                    else:
+                        self.assertEqual(code, 0)
+                        self.assertEqual(payload["checks"]["has_sitemap_xml"], present)
+                        item = payload["checks"]["sitemap_xml"][0]
+                    self.assertEqual(item["present"], present)
+                    self.assertEqual(item["body_truncated"], size > 1_000_000)
                     self.assertNotIn("body", item)
                     self.assertEqual(paths, ["/", "/robots.txt", "/sitemap.xml"])
 

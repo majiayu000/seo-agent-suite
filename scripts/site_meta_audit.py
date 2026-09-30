@@ -127,9 +127,11 @@ def resource_present(item: dict, filename: str) -> tuple[bool, str]:
         return False, "looks like HTML, not a crawl resource"
     if filename == "sitemap.xml":
         try:
-            # Fetch returns a bounded sample; do not require its closing root or EOF.
+            # Require EOF well-formedness unless fetch confirms a truncated sample.
             parser = ElementTree.XMLPullParser(events=("start",))
             parser.feed(body)
+            if not item.get("body_truncated"):
+                parser.close()
             root = None
             for _, element in parser.read_events():
                 if root is None:
