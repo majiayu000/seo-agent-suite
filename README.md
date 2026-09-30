@@ -5,7 +5,7 @@
 
 Codex plugin for evidence-backed SEO and discoverability audits.
 
-This repository is the execution layer for Shipwise-style discoverability work. Shipwise remains the launch/discoverability planning system; this plugin provides reusable skills and scripts that collect evidence and turn it into repo, package, site, and content SEO actions.
+This repository is the execution layer for Shipwise-style discoverability work. [Shipwise](https://majiayu000.github.io/shipwise/) remains the launch/discoverability planning system; this plugin provides reusable skills and scripts that collect evidence and turn it into repo, package, site, and content SEO actions.
 
 ## Relationship To Shipwise
 
@@ -25,6 +25,13 @@ seo-agent-suite
 Use Shipwise to decide launch strategy, platform fit, messaging, and project records. Use SEO Agent Suite to run audits, collect public-surface evidence, and generate SEO issues or reports.
 
 ## Quick Start
+
+Clone the repository to run the local audits with Python 3.10 or newer:
+
+```bash
+git clone https://github.com/majiayu000/seo-agent-suite.git
+cd seo-agent-suite
+```
 
 Run the local validation checks:
 
