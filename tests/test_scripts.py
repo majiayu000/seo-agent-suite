@@ -223,6 +223,9 @@ discoverability:
             "!!int &value 123 # note",
             "&value [repo, seo] # note",
             "!!map {foo: bar} # note",
+            "*numeric",
+            "*numeric # note",
+            "*text",
         ]
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -247,7 +250,7 @@ discoverability:
                     with self.subTest(field=field, value=value):
                         fields = {**valid_fields, field: value}
                         project_yaml.write_text(
-                            "discoverability:\n"
+                            'value: &numeric 123\ntext: &text "repo seo"\ndiscoverability:\n'
                             + "".join(f"  {key}: {item}\n" for key, item in fields.items())
                             + tail,
                             encoding="utf-8",
@@ -292,10 +295,12 @@ discoverability:
             issue_dir.mkdir(parents=True)
             (issue_dir / "bug.md").write_text("# Bug\n", encoding="utf-8")
             project_yaml = root / "project.yaml"
-            for value in ["null", "true", "123", "1.5", "+123", "0o17", "0xFF", ".5", "123.", ".inf", "[repo, seo]", "{foo: bar}", "123 # note", "!!int 123", "&value 123", "&value !!int 123 # note", '!!int "123"']:
+            for value in ["null", "true", "123", "1.5", "+123", "0o17", "0xFF", ".5", "123.", ".inf", "[repo, seo]", "{foo: bar}", "123 # note", "!!int 123", "&value 123", "&value !!int 123 # note", '!!int "123"', "*numeric", "*numeric # note", "*text"]:
                 with self.subTest(value=value):
                     project_yaml.write_text(
-                        f"""discoverability:
+                        f"""value: &numeric 123
+text: &text "repo seo"
+discoverability:
   description: {value}
   primary_keyword: {value}
   keywords:
@@ -387,7 +392,7 @@ discoverability:
     - "open-source"
   social_image_set: true
 """
-            for value in ["null", "true", "123", "1.5", "[repo, seo]", "{foo: bar}", "[repo, {foo: bar}]", "{foo: [repo, seo]}", "123 # note", "!!int 123", "&value 123"]:
+            for value in ["null", "true", "123", "1.5", "[repo, seo]", "{foo: bar}", "[repo, {foo: bar}]", "{foo: [repo, seo]}", "123 # note", "!!int 123", "&value 123", "*numeric", "repo *numeric"]:
                 with self.subTest(string=value):
                     project_yaml.write_text(
                         "discoverability:\n"
@@ -411,6 +416,12 @@ discoverability:
                 ("!<tag:yaml.org,2002:str> 123", "!<tag:yaml.org,2002:str> 123", "123"),
                 ("! 123", "! 123", "123"),
                 ('"A repo seo helper"', '"repo seo"', "A repo seo helper"),
+                ("'A repo''s seo helper'", '"repo\'s seo"', "A repo's seo helper"),
+                ('"A repo\'s seo helper"', "'repo''s seo'", "A repo's seo helper"),
+                ("&text !!str 'A repo''s seo helper' # note", "!!str &keyword 'repo''s seo' # note", "A repo's seo helper"),
+                ("'A repo''''s seo helper'", '"repo\'\'s seo"', "A repo''s seo helper"),
+                (r"'A repo\n seo helper'", r"'repo\n seo'", r"A repo\n seo helper"),
+                ("'A *numeric helper' # note", "'*numeric' # note", "A *numeric helper"),
             ]:
                 with self.subTest(description=description, keyword=keyword):
                     project_yaml.write_text(
@@ -425,6 +436,7 @@ discoverability:
                     payload = json.loads(result.stdout)
                     self.assertEqual(payload["errors"], [])
                     self.assertEqual(payload["shipwise"]["discoverability"]["description"], expected)
+                    self.assertEqual(payload["shipwise"]["discoverability"]["primary_keyword"], expected.removeprefix("A ").removesuffix(" helper"))
                     self.assertEqual(payload["shipwise"]["discoverability"]["homepage_url"], "https://example.com")
             for field in fields:
                 for missing in [True, False]:

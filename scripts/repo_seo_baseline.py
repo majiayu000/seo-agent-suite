@@ -235,8 +235,13 @@ def parse_scalar(value: str) -> object:
         return None
     quoted = re.fullmatch(r'''("(?:[^"\\]|\\.)*"|'(?:[^']|'')*')(?:\s+#.*)?''', value)
     if quoted:
-        return quoted.group(1)[1:-1]
+        literal = quoted.group(1)
+        content = literal[1:-1]
+        return content.replace("''", "'") if literal.startswith("'") else content
     value = re.split(r"(?:^|\s+)#", value, maxsplit=1)[0].rstrip()
+    # Aliases cannot be typed without resolving the document's anchors.
+    if value.startswith("*"):
+        return None
     if value.startswith(("[", "{")):
         return [] if value == "[]" else None
     if tag is not None:
