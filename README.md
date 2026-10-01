@@ -63,12 +63,54 @@ The plugin manifest lives at [.codex-plugin/plugin.json](.codex-plugin/plugin.js
 Skills live under [skills/](skills/), and reference material lives under
 [references/](references/).
 
+## Choose an audit and interpret its report
+
+| Task | Start here | What to inspect |
+| --- | --- | --- |
+| Review a repository before launch | `repo_seo_baseline.py --root /absolute/repo/path --json` | `readmes`, `community_files`, manifests and collected GitHub metadata |
+| Check a Shipwise launch record | Add `--project-yaml /absolute/path/project.yaml` | `shipwise.checks`, `errors` and the record's proof fields |
+| Check a public page | `site_meta_audit.py https://your-public-site.example/ --json` | `checks`, canonical, title, description and crawl-resource responses |
+| Decide what content to write | [seo-content-geo](skills/seo-content-geo/SKILL.md) | Task intent, current source evidence, target page and unanswered questions |
+| Establish demand or indexing | [seo-data-sources](skills/seo-data-sources/SKILL.md) | Authorized provider access and the claim each source can support |
+
+Run the scripts from this repository's checkout, even when `--root` points to
+another project. Save a report outside the audited repository if you want to
+keep its working tree unchanged:
+
+```bash
+python3 scripts/repo_seo_baseline.py --root /absolute/repo/path --json > /absolute/report/path/repo-baseline.json
+```
+
+For the repository audit, `status: error` and exit code **1** mean a collected
+manifest, site-resource or Shipwise check failed. Read each `errors` entry's
+surface, check/resource and reason before fixing the source. Other evidence,
+including subprocess results, still needs review; `status: ok` is not a universal
+launch-readiness verdict.
+
+For the page audit, exit code **0** means the target page was fetched successfully.
+Missing metadata and crawl resources can still appear as **false** in `checks`.
+A non-zero exit reports a page-fetch failure or invalid input. Inspect the JSON
+rather than treating either script's exit code as a search-performance score.
+
+Local scripts require no SEO-provider API keys, but repository checks can call
+installed tools and public URLs. They do not connect Search Console or keyword
+providers automatically. An authenticated service such as
+[OpenSEO's Codex integration](https://openseo.so/docs/codex-plugin) has a separate
+OAuth and data-access workflow; access must be established before using its
+keyword or performance data in a claim.
+
+For a content review, specify a real target page and ask for one or two primary
+user tasks, related questions, source URLs and confidence labels. Use
+[Shipwise's discoverability guide](https://github.com/majiayu000/shipwise/blob/main/docs/DISCOVERABILITY.md)
+to connect those findings to the launch record and
+[the report template](references/report-template.md) to keep evidence reviewable.
+
 ## Skills
 
-- `github-repo-seo`: GitHub repository, README, package registry, docs site, and Search Console boundary checks.
-- `technical-seo-audit`: Crawlability, metadata, canonical, robots, sitemap, structured data, and page health checks.
-- `seo-content-geo`: Keyword mapping, content briefs, GEO/AEO readiness, and AI citation-oriented content review.
-- `seo-data-sources`: Provider selection and evidence boundaries for local scripts, Firecrawl, Google Search Console, PageSpeed/CrUX, DataForSEO, SE Ranking, and Ahrefs.
+- [github-repo-seo](skills/github-repo-seo/SKILL.md): GitHub repository, README, package registry, docs site, and Search Console boundary checks.
+- [technical-seo-audit](skills/technical-seo-audit/SKILL.md): Crawlability, metadata, canonical, robots, sitemap, structured data, and page health checks.
+- [seo-content-geo](skills/seo-content-geo/SKILL.md): Keyword mapping, content briefs, GEO/AEO readiness, and AI citation-oriented content review.
+- [seo-data-sources](skills/seo-data-sources/SKILL.md): Provider selection and evidence boundaries for local scripts, Firecrawl, Google Search Console, PageSpeed/CrUX, DataForSEO, SE Ranking, and Ahrefs.
 
 ## Scripts
 
@@ -98,3 +140,10 @@ See [CHANGELOG.md](CHANGELOG.md).
 - Do not present optional MCP providers as installed unless the current environment proves it.
 - Do not automate posting or publishing. This plugin audits and prepares evidence; publishing still requires explicit user instruction.
 - The declared `Write` capability is for local report and issue-draft files only, never for remote publishing.
+
+## Support and license
+
+Use [GitHub issues](https://github.com/majiayu000/seo-agent-suite/issues) for
+reproducible audit failures, with redacted input and the relevant report fields.
+See [LICENSE](LICENSE) for the MIT terms and [CHANGELOG.md](CHANGELOG.md) for
+version history.
