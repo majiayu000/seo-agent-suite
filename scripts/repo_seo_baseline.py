@@ -152,16 +152,21 @@ def collect_manifests(root: Path) -> dict:
             manifests["cargo"] = {"path": "Cargo.toml", "status": "error", "reason": cargo_error["reason"]}
     if cargo_data:
         package = cargo_data.get("package", {})
-        manifests["cargo"] = {
-            "path": "Cargo.toml",
-            "name": package.get("name"),
-            "description": package.get("description"),
-            "homepage": package.get("homepage"),
-            "repository": package.get("repository"),
-            "readme": package.get("readme"),
-            "keywords": package.get("keywords"),
-            "categories": package.get("categories"),
-        }
+        if not isinstance(package, dict):
+            error = {"path": "Cargo.toml", "status": "error", "reason": "package must be a TOML table"}
+            manifests["errors"].append(error)
+            manifests["cargo"] = error
+        else:
+            manifests["cargo"] = {
+                "path": "Cargo.toml",
+                "name": package.get("name"),
+                "description": package.get("description"),
+                "homepage": package.get("homepage"),
+                "repository": package.get("repository"),
+                "readme": package.get("readme"),
+                "keywords": package.get("keywords"),
+                "categories": package.get("categories"),
+            }
 
     pyproject = root / "pyproject.toml"
     pyproject_data = None
@@ -172,13 +177,18 @@ def collect_manifests(root: Path) -> dict:
             manifests["python"] = {"path": "pyproject.toml", "status": "error", "reason": pyproject_error["reason"]}
     if pyproject_data:
         project = pyproject_data.get("project", {})
-        manifests["python"] = {
-            "path": "pyproject.toml",
-            "name": project.get("name"),
-            "description": project.get("description"),
-            "urls": project.get("urls"),
-            "keywords": project.get("keywords"),
-        }
+        if not isinstance(project, dict):
+            error = {"path": "pyproject.toml", "status": "error", "reason": "project must be a TOML table"}
+            manifests["errors"].append(error)
+            manifests["python"] = error
+        else:
+            manifests["python"] = {
+                "path": "pyproject.toml",
+                "name": project.get("name"),
+                "description": project.get("description"),
+                "urls": project.get("urls"),
+                "keywords": project.get("keywords"),
+            }
 
     return manifests
 
@@ -286,7 +296,7 @@ def collect_community_files(root: Path) -> dict:
         "contributing": any((root / name).exists() for name in ["CONTRIBUTING.md", "CONTRIBUTING"]),
         "code_of_conduct": any((root / name).exists() for name in ["CODE_OF_CONDUCT.md", "CODE_OF_CONDUCT"]),
         "security": any((root / name).exists() for name in ["SECURITY.md", "SECURITY"]),
-        "issue_templates": issue_templates.exists() and any(issue_templates.iterdir()),
+        "issue_templates": issue_templates.is_dir() and any(issue_templates.iterdir()),
     }
 
 
