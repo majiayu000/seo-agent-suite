@@ -168,7 +168,17 @@ class RepoSeoBaselineTests(unittest.TestCase):
             self.assertNotIn("dummy-password", stdout.getvalue())
             payload = json.loads(stdout.getvalue())
             self.assertEqual(payload["site"]["https://example.invalid/docs"]["homepage"]["status"], "error")
-            self.assertEqual(request.call_count, 6)
+            self.assertEqual(request.call_count, 8)
+            expected_urls = []
+            for homepage in homepages:
+                origin = homepage.removesuffix("/docs")
+                expected_urls.extend([
+                    homepage,
+                    origin + "/robots.txt",
+                    origin + "/sitemap.xml",
+                    homepage + "/sitemap.xml",
+                ])
+            self.assertEqual([call.args[0] for call in request.call_args_list], expected_urls)
 
     def test_invalid_homepage_scheme_diagnostic_redacts_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
