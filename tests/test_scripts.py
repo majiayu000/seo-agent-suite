@@ -9,7 +9,10 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
@@ -247,7 +250,17 @@ class RepoSeoBaselineTests(unittest.TestCase):
             self.assertNotIn("dummy-password", stdout.getvalue())
             payload = json.loads(stdout.getvalue())
             self.assertEqual(payload["site"]["https://example.invalid/docs"]["homepage"]["status"], "error")
-            self.assertEqual(request.call_count, 6)
+            self.assertEqual(request.call_count, 8)
+            expected_urls = []
+            for homepage in homepages:
+                origin = homepage.removesuffix("/docs")
+                expected_urls.extend([
+                    homepage,
+                    origin + "/robots.txt",
+                    origin + "/sitemap.xml",
+                    homepage + "/sitemap.xml",
+                ])
+            self.assertEqual([call.args[0] for call in request.call_args_list], expected_urls)
 
     def test_invalid_homepage_scheme_diagnostic_redacts_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1006,6 +1019,320 @@ discoverability:
 
         self.assertEqual(errors[0]["resource"], "robots")
         self.assertEqual(errors[0]["reason"], "redirect blocked")
+
+
+class OriginResourceTests(unittest.TestCase):
+    @contextmanager
+    def http_site(self, routes):
+        paths = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                paths.append(self.path)
+                status, content_type, body = routes.get(
+                    self.path, (200, "text/html", "<html><title>Not found</title></html>")
+                )
+                payload = body.encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield f"http://crawl.example:{server.server_port}", paths, server.server_port
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def run_audit(self, name, homepage, port):
+        module = load_script(name)
+        shared = public_http_mod(module)
+        public_answer = [
+            (shared.socket.AF_INET, shared.socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ]
+
+        def connect_local(endpoint, timeout):
+            connection = shared.socket.socket(endpoint[0], endpoint[1], endpoint[2])
+            connection.settimeout(timeout)
+            connection.connect(("127.0.0.1", port))
+            return connection
+
+        with tempfile.TemporaryDirectory() as root:
+            args = [name, homepage, "--json"] if name == "site_meta_audit.py" else [
+                name, "--root", root, "--homepage", homepage, "--json"
+            ]
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(shared.socket, "getaddrinfo", return_value=public_answer),
+                mock.patch.object(shared, "connect_endpoint", side_effect=connect_local),
+                mock.patch.object(shared, "select_proxy", return_value=None),
+                mock.patch.object(sys, "argv", args),
+                mock.patch.object(sys, "stdout", stdout),
+            ):
+                if name == "repo_seo_baseline.py":
+                    with mock.patch.object(module, "run_cmd", return_value={"status": "ok"}):
+                        code = module.main()
+                else:
+                    code = module.main()
+            return code, json.loads(stdout.getvalue())
+
+    def test_sitemap_presence_requires_a_parsed_sitemap_root(self):
+        namespace = "http://www.sitemaps.org/schemas/sitemap/0.9"
+        bodies = (
+            (f'<sm:urlset xmlns:sm="{namespace}"><sm:url><sm:loc>https://example.com/</sm:loc></sm:url></sm:urlset>', True),
+            (f'<sm:sitemapindex xmlns:sm="{namespace}"/>', True),
+            (f'<?xml version="1.0"?>' + "<!-- preamble -->" * 80 + f'<urlset xmlns="{namespace}"/>', True),
+            ("not XML, but mentions <urlset></urlset>", False),
+            ("<urlset><url></urlset>", False),
+            ("<urlset>", False),
+            ("<urlset><url>", False),
+            ("<error><urlset/></error>", False),
+            ("<!-- <urlset/> --><error/>", False),
+            ("<urlset_fake/>", False),
+        )
+        for body, present in bodies:
+            for name in ("repo_seo_baseline.py", "site_meta_audit.py"):
+                routes = {
+                    "/robots.txt": (200, "text/plain", "User-agent: *\nDisallow:\n"),
+                    "/sitemap.xml": (200, "application/xml", body),
+                }
+                with self.subTest(body=body[:80], script=name), self.http_site(routes) as (origin, paths, port):
+                    code, payload = self.run_audit(name, origin, port)
+                    if name == "repo_seo_baseline.py":
+                        self.assertEqual(code, 0 if present else 1)
+                        item = payload["site"][origin]["sitemap"]
+                        self.assertEqual(item["status"], "ok" if present else "error")
+                        self.assertEqual(payload["status"], "ok" if present else "error")
+                        self.assertEqual({error["resource"] for error in payload["errors"]}, set() if present else {"sitemap"})
+                    else:
+                        self.assertEqual(code, 0)
+                        self.assertEqual(payload["checks"]["has_sitemap_xml"], present)
+                        item = payload["checks"]["sitemap_xml"][0]
+                    self.assertEqual(item["present"], present)
+                    self.assertNotIn("body", item)
+                    if not present:
+                        self.assertTrue(item["reason"])
+                    self.assertEqual(paths, ["/", "/robots.txt", "/sitemap.xml"])
+
+    def test_large_sitemap_sample_passes_both_audits(self):
+        namespace = "http://www.sitemaps.org/schemas/sitemap/0.9"
+        for root, child in (("urlset", "url"), ("sitemapindex", "sitemap")):
+            entry = f"<sm:{child}><sm:loc>https://example.com/page</sm:loc></sm:{child}>"
+            body = f'<sm:{root} xmlns:sm="{namespace}">' + entry * 18000 + f"</sm:{root}>"
+            self.assertGreater(len(body.encode("utf-8")), 1_000_000)
+            routes = {
+                "/robots.txt": (200, "text/plain", "User-agent: *\nDisallow:\n"),
+                "/sitemap.xml": (200, "application/xml", body),
+            }
+            for name in ("repo_seo_baseline.py", "site_meta_audit.py"):
+                with self.subTest(root=root, script=name), self.http_site(routes) as (origin, paths, port):
+                    code, payload = self.run_audit(name, origin, port)
+                    self.assertEqual(code, 0)
+                    if name == "repo_seo_baseline.py":
+                        item = payload["site"][origin]["sitemap"]
+                        self.assertEqual(item["status"], "ok")
+                        self.assertEqual(payload["errors"], [])
+                    else:
+                        self.assertTrue(payload["checks"]["has_sitemap_xml"])
+                        item = payload["checks"]["sitemap_xml"][0]
+                    self.assertTrue(item["present"])
+                    self.assertNotIn("body", item)
+                    self.assertEqual(paths, ["/", "/robots.txt", "/sitemap.xml"])
+
+    def test_sitemap_byte_limit_distinguishes_eof_from_truncation(self):
+        for size, closing, present in (
+            (999_999, "</urlset>", True),
+            (1_000_000, "</urlset>", True),
+            (1_000_001, "</urlset>", True),
+            (1_000_000, "", False),
+        ):
+            body = "<urlset>" + " " * (size - len("<urlset>" + closing)) + closing
+            routes = {
+                "/robots.txt": (200, "text/plain", "User-agent: *\nDisallow:\n"),
+                "/sitemap.xml": (200, "application/xml", body),
+            }
+            for name in ("repo_seo_baseline.py", "site_meta_audit.py"):
+                with self.subTest(size=size, present=present, script=name), self.http_site(routes) as (origin, paths, port):
+                    code, payload = self.run_audit(name, origin, port)
+                    if name == "repo_seo_baseline.py":
+                        self.assertEqual(code, 0 if present else 1)
+                        item = payload["site"][origin]["sitemap"]
+                    else:
+                        self.assertEqual(code, 0)
+                        self.assertEqual(payload["checks"]["has_sitemap_xml"], present)
+                        item = payload["checks"]["sitemap_xml"][0]
+                    self.assertEqual(item["present"], present)
+                    self.assertEqual(item["body_truncated"], size > 1_000_000)
+                    self.assertNotIn("body", item)
+                    self.assertEqual(paths, ["/", "/robots.txt", "/sitemap.xml"])
+
+    def test_document_homepage_finds_sibling_sitemap(self):
+        routes = {
+            "/robots.txt": (200, "text/plain", "User-agent: *\nDisallow:\n"),
+            "/sitemap.xml": (404, "text/plain", "missing"),
+            "/docs/sitemap.xml": (200, "application/xml", "<urlset/>"),
+        }
+        for path in ("/docs/index.html", "/docs/start"):
+            for name in ("repo_seo_baseline.py", "site_meta_audit.py"):
+                with self.subTest(path=path, script=name), self.http_site(routes) as (origin, paths, port):
+                    code, payload = self.run_audit(name, origin + path, port)
+                    self.assertEqual(code, 0)
+                    if name == "repo_seo_baseline.py":
+                        item = payload["site"][origin + path]["sitemap"]
+                        self.assertEqual(item["status"], "ok")
+                        self.assertEqual(payload["errors"], [])
+                    else:
+                        self.assertTrue(payload["checks"]["has_sitemap_xml"])
+                        item = next(item for item in payload["checks"]["sitemap_xml"] if item["present"])
+                    self.assertEqual(item["url"], origin + "/docs/sitemap.xml")
+                    self.assertEqual(paths, [path, "/robots.txt", "/sitemap.xml", "/docs/sitemap.xml", path + "/sitemap.xml"])
+
+    def test_project_sitemap_can_succeed_after_an_invalid_origin_candidate(self):
+        for path in ("/project/", "/project"):
+            for root_sitemap in (
+                (404, "text/plain", "missing"),
+                (200, "text/html", "<html>missing</html>"),
+                (200, "application/xml", "<error/>"),
+            ):
+                for name in ("repo_seo_baseline.py", "site_meta_audit.py"):
+                    routes = {
+                        "/robots.txt": (200, "text/plain", "User-agent: *\nDisallow:\n"),
+                        "/sitemap.xml": root_sitemap,
+                        "/project/sitemap.xml": (200, "application/xml", "<urlset/>"),
+                    }
+                    with self.subTest(path=path, root_sitemap=root_sitemap, script=name), self.http_site(routes) as (origin, paths, port):
+                        code, payload = self.run_audit(name, origin + path, port)
+                        self.assertEqual(code, 0)
+                        if name == "repo_seo_baseline.py":
+                            item = payload["site"][origin + path.rstrip("/")]["sitemap"]
+                            self.assertEqual(payload["errors"], [])
+                            self.assertEqual(item["status"], "ok")
+                        else:
+                            self.assertTrue(payload["checks"]["has_sitemap_xml"])
+                            first, item = payload["checks"]["sitemap_xml"]
+                            self.assertFalse(first["present"])
+                        self.assertTrue(item["present"])
+                        self.assertEqual(item["url"], origin + "/project/sitemap.xml")
+                        expected_page = path.rstrip("/") if name == "repo_seo_baseline.py" else path
+                        self.assertEqual(paths, [expected_page, "/robots.txt", "/sitemap.xml", "/project/sitemap.xml"])
+
+    def test_docs_sitemap_is_valid_but_docs_robots_cannot_replace_origin_robots(self):
+        routes = {
+            "/robots.txt": (404, "text/plain", "missing"),
+            "/sitemap.xml": (404, "text/plain", "missing"),
+            "/docs/robots.txt": (200, "text/plain", "User-agent: *\nDisallow:\n"),
+            "/docs/sitemap.xml": (200, "application/xml", "<urlset></urlset>"),
+        }
+        for name in ("repo_seo_baseline.py", "site_meta_audit.py"):
+            with self.subTest(script=name), self.http_site(routes) as (origin, paths, port):
+                code, payload = self.run_audit(name, origin + "/docs/", port)
+                if name == "repo_seo_baseline.py":
+                    self.assertEqual(code, 1)
+                    self.assertEqual({item["resource"] for item in payload["errors"]}, {"robots"})
+                    self.assertEqual(payload["site"][origin + "/docs"]["sitemap"]["url"], origin + "/docs/sitemap.xml")
+                else:
+                    self.assertEqual(code, 0)  # Metadata CLI keeps its existing page-status exit contract.
+                    self.assertFalse(payload["checks"]["has_robots_txt"])
+                    self.assertTrue(payload["checks"]["has_sitemap_xml"])
+                expected_page = "/docs" if name == "repo_seo_baseline.py" else "/docs/"
+                self.assertEqual(paths, [expected_page, "/robots.txt", "/sitemap.xml", "/docs/sitemap.xml"])
+
+    def test_origin_resources_pass_for_docs_and_pathless_homepages(self):
+        routes = {
+            "/robots.txt": (200, "text/plain", "User-agent: *\nDisallow:\n"),
+            "/sitemap.xml": (200, "application/xml", '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></sitemapindex>'),
+        }
+        for name in ("repo_seo_baseline.py", "site_meta_audit.py"):
+            for path in ("/docs/", ""):
+                with self.subTest(script=name, path=path), self.http_site(routes) as (origin, paths, port):
+                    code, payload = self.run_audit(name, origin + path, port)
+                    self.assertEqual(code, 0)
+                    if name == "repo_seo_baseline.py":
+                        checks = payload["site"][origin + path.rstrip("/")]
+                        self.assertEqual(checks["robots"]["status"], "ok")
+                        self.assertEqual(checks["sitemap"]["status"], "ok")
+                    else:
+                        checks = payload["checks"]
+                        self.assertTrue(checks["has_robots_txt"])
+                        self.assertTrue(checks["has_sitemap_xml"])
+                        self.assertEqual(len(checks["robots_txt"]), 1)
+                        self.assertEqual(len(checks["sitemap_xml"]), 2 if path else 1)
+                    expected_page = path.rstrip("/") or "/" if name == "repo_seo_baseline.py" else path or "/"
+                    expected_paths = [expected_page, "/robots.txt", "/sitemap.xml"]
+                    if path:
+                        expected_paths.append("/docs/sitemap.xml")
+                    self.assertEqual(paths, expected_paths)
+
+    def test_soft_404_and_non_sitemap_xml_fail_baseline_gate(self):
+        for robots, sitemap in (
+            ((200, "text/html", "<html>missing</html>"), (200, "text/html", "<html>missing</html>")),
+            ((200, "text/plain", "<html>missing</html>"), (200, "application/xml", "<error>missing</error>")),
+            ((204, "text/plain", ""), (204, "application/xml", "")),
+        ):
+            routes = {"/robots.txt": robots, "/sitemap.xml": sitemap}
+            with self.subTest(robots=robots, sitemap=sitemap), self.http_site(routes) as (origin, paths, port):
+                code, payload = self.run_audit("repo_seo_baseline.py", origin, port)
+                self.assertEqual(code, 1)
+                checks = payload["site"][origin]
+                for resource in ("robots", "sitemap"):
+                    self.assertEqual(checks[resource]["status"], "error")
+                    self.assertFalse(checks[resource]["present"])
+                    self.assertTrue(checks[resource]["reason"])
+                    self.assertNotIn("body", checks[resource])
+                self.assertEqual({item["resource"] for item in payload["errors"]}, {"robots", "sitemap"})
+
+    def test_resource_candidates_keep_authority_and_drop_query_and_fragment(self):
+        module = load_script("site_meta_audit.py")
+        for homepage, origin in (
+            ("https://example.com", "https://example.com"),
+            ("https://example.com/docs/page?lang=en#intro", "https://example.com"),
+            ("http://example.com:8080/docs/", "http://example.com:8080"),
+            ("https://[2606:4700:4700::1111]:8443/docs/", "https://[2606:4700:4700::1111]:8443"),
+        ):
+            for filename in ("robots.txt", "sitemap.xml"):
+                with self.subTest(homepage=homepage, filename=filename):
+                    expected = [origin + "/" + filename]
+                    if filename == "sitemap.xml" and "/docs" in homepage:
+                        path = "/docs/page" if "page?" in homepage else "/docs"
+                        if "page?" in homepage:
+                            expected.append(origin + "/docs/sitemap.xml")
+                        expected.append(origin + path + "/sitemap.xml")
+                    self.assertEqual(module.resource_candidates(homepage, filename), expected)
+
+    def test_origin_resource_fetches_preserve_public_url_validation(self):
+        for name in ("repo_seo_baseline.py", "site_meta_audit.py"):
+            module = load_script(name)
+            shared = public_http_mod(module)
+            private_answer = [
+                (shared.socket.AF_INET, shared.socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))
+            ]
+            for homepage, reason in (
+                ("http://private.example/docs/", "non-public"),
+                ("http://dummy:dummy@public.example/docs/", "credentials"),
+            ):
+                with (
+                    self.subTest(script=name, homepage=homepage),
+                    mock.patch.object(shared.socket, "getaddrinfo", return_value=private_answer) as dns,
+                    mock.patch.object(shared, "connect_endpoint") as connect,
+                ):
+                    items = module.site_resource_checks(homepage).values() if name == "repo_seo_baseline.py" else (
+                        module.check_candidates(homepage, "robots.txt") + module.check_candidates(homepage, "sitemap.xml")
+                    )
+                    for item in items:
+                        self.assertEqual(item["status"], "error")
+                        self.assertIn(reason, item["reason"])
+                        self.assertNotIn("body", item)
+                    connect.assert_not_called()
+                    if reason == "credentials":
+                        dns.assert_not_called()
 
 
 class RegistryPackageNameTests(unittest.TestCase):

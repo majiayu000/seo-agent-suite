@@ -499,11 +499,14 @@ def http_check(url: str, timeout: int = 15) -> dict:
 
 def fetch_public_url(url: str, timeout: int = 20, *, max_body_bytes: int = 1_000_000) -> dict:
     """Return audit-friendly fetch result with decoded body for successful responses."""
-    result = follow_public_http(url, timeout=timeout, max_body_bytes=max_body_bytes)
+    # Read one extra byte to distinguish a bounded sample from a response at EOF.
+    result = follow_public_http(url, timeout=timeout, max_body_bytes=max_body_bytes + 1)
     if result.get("status") != "ok":
         return {key: value for key, value in result.items() if key != "body"}
     content_type = result.get("content_type")
     body = result.get("body") or b""
+    body_truncated = len(body) > max_body_bytes
+    body = body[:max_body_bytes]
     charset = charset_from_content_type(content_type) or "utf-8"
     return {
         "status": "ok",
@@ -511,4 +514,5 @@ def fetch_public_url(url: str, timeout: int = 20, *, max_body_bytes: int = 1_000
         "http_status": result["http_status"],
         "content_type": content_type,
         "body": body.decode(charset, errors="replace"),
+        "body_truncated": body_truncated,
     }

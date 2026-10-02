@@ -26,7 +26,7 @@ Use Shipwise to decide launch strategy, platform fit, messaging, and project rec
 
 ## Quick Start
 
-Clone the repository to run the local audits with Python 3.10 or newer:
+Clone the repository to run the local audits with Python 3.11 or newer:
 
 ```bash
 git clone https://github.com/majiayu000/seo-agent-suite.git

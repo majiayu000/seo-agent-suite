@@ -9,6 +9,7 @@ import sys
 import urllib.parse
 from html.parser import HTMLParser
 from pathlib import Path
+from xml.etree import ElementTree
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
@@ -94,10 +95,14 @@ def first_link(parser: MetaParser, rel: str) -> str | None:
 
 def resource_candidates(base_url: str, filename: str) -> list[str]:
     parsed = urllib.parse.urlparse(base_url)
-    origin = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
-    page_relative = urllib.parse.urljoin(base_url if base_url.endswith("/") else base_url.rsplit("/", 1)[0] + "/", filename)
-    origin_relative = origin.rstrip("/") + "/" + filename
-    return list(dict.fromkeys([page_relative, origin_relative]))
+    origin_relative = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, "/" + filename, "", "", ""))
+    if filename != "sitemap.xml":
+        return [origin_relative]
+    project_relative = urllib.parse.urlunparse(
+        (parsed.scheme, parsed.netloc, parsed.path.rstrip("/") + "/" + filename, "", "", "")
+    )
+    page_relative = urllib.parse.urljoin(base_url, filename)
+    return list(dict.fromkeys([origin_relative, page_relative, project_relative]))
 
 
 def check_candidates(base_url: str, filename: str) -> list[dict]:
@@ -120,8 +125,23 @@ def resource_present(item: dict, filename: str) -> tuple[bool, str]:
     content_type = str(item.get("content_type") or "").lower()
     if "<html" in body[:500].lower() or "text/html" in content_type:
         return False, "looks like HTML, not a crawl resource"
-    if filename == "sitemap.xml" and "<urlset" not in body[:1000] and "<sitemapindex" not in body[:1000]:
-        return False, "missing sitemap XML root"
+    if filename == "sitemap.xml":
+        try:
+            # Require EOF well-formedness unless fetch confirms a truncated sample.
+            parser = ElementTree.XMLPullParser(events=("start",))
+            parser.feed(body)
+            if not item.get("body_truncated"):
+                parser.close()
+            root = None
+            for _, element in parser.read_events():
+                if root is None:
+                    root = element
+        except ElementTree.ParseError:
+            return False, "invalid sitemap XML"
+        if root is None:
+            return False, "invalid sitemap XML"
+        if root.tag.rsplit("}", 1)[-1] not in {"urlset", "sitemapindex"}:
+            return False, "missing sitemap XML root"
     return True, ""
 
 
