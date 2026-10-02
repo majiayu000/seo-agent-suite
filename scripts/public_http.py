@@ -39,9 +39,24 @@ def validate_public_http_url(url: str) -> tuple[urllib.parse.ParseResult, list[R
     if not endpoints:
         raise ValueError("hostname resolution returned no addresses")
     addresses = {item[4][0].split("%", 1)[0] for item in endpoints}
-    blocked = sorted(address for address in addresses if not ipaddress.ip_address(address).is_global)
-    if blocked:
-        raise ValueError("URL resolves to a non-public address")
+    for address in addresses:
+        ip = ipaddress.ip_address(address)
+        if isinstance(ip, ipaddress.IPv6Address):
+            if ip.ipv4_mapped is not None:
+                ip = ip.ipv4_mapped
+            elif ip in ipaddress.IPv6Network("64:ff9b::/96"):
+                # RFC 6052 embeds the actual IPv4 destination in the low 32 bits.
+                ip = ipaddress.IPv4Address(ip.packed[-4:])
+        if (
+            not ip.is_global
+            or ip.is_multicast
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_unspecified
+            or ip.is_reserved
+            or (isinstance(ip, ipaddress.IPv6Address) and ip.is_site_local)
+        ):
+            raise ValueError("URL resolves to a non-public address")
     return parsed, endpoints
 
 
@@ -484,11 +499,14 @@ def http_check(url: str, timeout: int = 15) -> dict:
 
 def fetch_public_url(url: str, timeout: int = 20, *, max_body_bytes: int = 1_000_000) -> dict:
     """Return audit-friendly fetch result with decoded body for successful responses."""
-    result = follow_public_http(url, timeout=timeout, max_body_bytes=max_body_bytes)
+    # Read one extra byte to distinguish a bounded sample from a response at EOF.
+    result = follow_public_http(url, timeout=timeout, max_body_bytes=max_body_bytes + 1)
     if result.get("status") != "ok":
         return {key: value for key, value in result.items() if key != "body"}
     content_type = result.get("content_type")
     body = result.get("body") or b""
+    body_truncated = len(body) > max_body_bytes
+    body = body[:max_body_bytes]
     charset = charset_from_content_type(content_type) or "utf-8"
     return {
         "status": "ok",
@@ -496,4 +514,5 @@ def fetch_public_url(url: str, timeout: int = 20, *, max_body_bytes: int = 1_000
         "http_status": result["http_status"],
         "content_type": content_type,
         "body": body.decode(charset, errors="replace"),
+        "body_truncated": body_truncated,
     }
