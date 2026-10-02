@@ -32,6 +32,88 @@ def public_http_mod(module):
     return module.public_http
 
 
+class PublicHttpURLTests(unittest.TestCase):
+    def test_request_blocks_non_public_endpoints_before_connect(self) -> None:
+        module = load_script("public_http.py")
+        addresses = [
+            "64:ff9b::a9fe:a9fe",  # NAT64 link-local IPv4
+            "64:ff9b::7f00:1",  # NAT64 loopback IPv4
+            "64:ff9b::a00:1",  # NAT64 private IPv4
+            "64:ff9b::e000:1",  # NAT64 multicast IPv4
+            "64:ff9b::",  # NAT64 unspecified IPv4
+            "64:ff9b:1::1",  # Local-use NAT64 prefix
+            "fec0::1",
+            "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",  # Site-local upper bound
+            "224.0.0.1",
+            "239.255.255.250",
+            "ff02::1",
+            "::ffff:224.0.0.1",  # IPv4-mapped multicast
+            "10.0.0.1",
+            "127.0.0.1",
+            "169.254.169.254",
+            "::ffff:127.0.0.1",
+            "::",
+            "::1",
+            "fe80::1",
+            "100::1",  # Reserved IPv6
+        ]
+        public_endpoint = (module.socket.AF_INET, module.socket.SOCK_STREAM, 6, "", ("8.8.8.8", 80))
+        for address in addresses:
+            ipv6 = ":" in address
+            family = module.socket.AF_INET6 if ipv6 else module.socket.AF_INET
+            sockaddr = (address, 80, 0, 0) if ipv6 else (address, 80)
+            endpoint = (family, module.socket.SOCK_STREAM, 6, "", sockaddr)
+            literal_url = f"http://[{address}]/" if ipv6 else f"http://{address}/"
+            for url in (literal_url, "http://audit-target.example/"):
+                for endpoints in ([endpoint], [public_endpoint, endpoint]):
+                    with (
+                        self.subTest(address=address, url=url, mixed=len(endpoints) > 1),
+                        mock.patch.object(module.socket, "getaddrinfo", return_value=endpoints),
+                        mock.patch.object(module, "select_proxy", return_value=None),
+                        mock.patch.object(
+                            module, "connect_endpoint", side_effect=AssertionError("blocked connect")
+                        ) as connect_endpoint,
+                    ):
+                        with self.assertRaisesRegex(
+                            ValueError, "^URL resolves to a non-public address$"
+                        ):
+                            module.request_public_url_once(url, 1)
+                        connect_endpoint.assert_not_called()
+
+    def test_public_unicast_endpoints_remain_allowed(self) -> None:
+        module = load_script("public_http.py")
+        for address in ("8.8.8.8", "2606:4700:4700::1111", "::ffff:8.8.8.8", "64:ff9b::808:808"):
+            ipv6 = ":" in address
+            family = module.socket.AF_INET6 if ipv6 else module.socket.AF_INET
+            sockaddr = (address, 80, 0, 0) if ipv6 else (address, 80)
+            endpoints = [(family, module.socket.SOCK_STREAM, 6, "", sockaddr)]
+            with self.subTest(address=address), mock.patch.object(
+                module.socket, "getaddrinfo", return_value=endpoints
+            ):
+                parsed, validated = module.validate_public_http_url("http://public.example/")
+            self.assertEqual(parsed.hostname, "public.example")
+            self.assertEqual(validated, endpoints)
+
+    def test_audit_entrypoints_report_non_public_address_error(self) -> None:
+        for script, entrypoint in (("repo_seo_baseline.py", "http_check"), ("site_meta_audit.py", "fetch")):
+            module = load_script(script)
+            shared = public_http_mod(module)
+            for address in ("64:ff9b::a9fe:a9fe", "fec0::1", "ff02::1"):
+                endpoint = (shared.socket.AF_INET6, shared.socket.SOCK_STREAM, 6, "", (address, 80, 0, 0))
+                with (
+                    self.subTest(script=script, address=address),
+                    mock.patch.object(shared.socket, "getaddrinfo", return_value=[endpoint]),
+                    mock.patch.object(shared, "select_proxy", return_value=None),
+                    mock.patch.object(
+                        shared, "connect_endpoint", side_effect=AssertionError("blocked connect")
+                    ) as connect_endpoint,
+                ):
+                    result = getattr(module, entrypoint)("http://audit-target.example/")
+                    self.assertEqual(result["status"], "error")
+                    self.assertEqual(result["reason"], "URL resolves to a non-public address")
+                    connect_endpoint.assert_not_called()
+
+
 class RepoSeoBaselineTests(unittest.TestCase):
     def run_script(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
