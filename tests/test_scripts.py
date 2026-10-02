@@ -306,6 +306,172 @@ class RepoSeoBaselineTests(unittest.TestCase):
         self.assertEqual(error["status"], "error")
         self.assertIn("denied", error["reason"])
 
+    def test_invalid_manifest_encoding_keeps_error_handoff(self) -> None:
+        module = load_script("repo_seo_baseline.py")
+        for filename in ["package.json", "Cargo.toml", "pyproject.toml"]:
+            for output_args in [("--json",), ()]:
+                with self.subTest(filename=filename, output_args=output_args), tempfile.TemporaryDirectory() as tmp:
+                    (Path(tmp) / filename).write_bytes(b"\xff")
+                    result = self.run_script("--root", tmp, *output_args)
+
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stderr, "")
+                    self.assertNotIn("Traceback", result.stdout)
+                    reason = (
+                        "invalid UTF-8" if filename == "package.json" or module.tomllib
+                        else "tomllib unavailable on Python <3.11"
+                    )
+                    if output_args:
+                        payload = json.loads(result.stdout)
+                        self.assertEqual(payload["status"], "error")
+                        self.assertEqual(len(payload["errors"]), 1)
+                        self.assertEqual(payload["errors"][0]["surface"], "manifest")
+                        self.assertEqual(payload["errors"][0]["path"], filename)
+                        self.assertIn(reason, payload["errors"][0]["reason"])
+                    else:
+                        self.assertIn("status: error", result.stdout)
+                        self.assertIn(reason, result.stdout)
+
+    def test_non_table_toml_sections_emit_json_errors(self) -> None:
+        module = load_script("repo_seo_baseline.py")
+        for filename, section, manifest in [
+            ("Cargo.toml", "package", "cargo"),
+            ("pyproject.toml", "project", "python"),
+        ]:
+            for value in ['"nope"', "true", "123", "1.5", "[]", '["demo"]', "1979-05-27"]:
+                with self.subTest(filename=filename, value=value), tempfile.TemporaryDirectory() as tmp:
+                    (Path(tmp) / filename).write_text(f"{section} = {value}\n", encoding="utf-8")
+                    result = self.run_script("--root", tmp, "--json")
+
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stderr, "")
+                    payload = json.loads(result.stdout)
+                    reason = (
+                        f"{section} must be a TOML table"
+                        if module.tomllib else "tomllib unavailable on Python <3.11"
+                    )
+                    error = {"path": filename, "status": "error", "reason": reason}
+                    self.assertEqual(payload["status"], "error")
+                    self.assertEqual(payload["manifests"][manifest], error)
+                    self.assertEqual(payload["manifests"]["errors"], [error])
+                    self.assertEqual(payload["errors"], [{"surface": "manifest", **error}])
+                    self.assertEqual(payload["registry"], {"npm": {}, "crates": {}})
+
+    def test_manifest_errors_accumulate_and_preserve_json_handoff(self) -> None:
+        module = load_script("repo_seo_baseline.py")
+        for toml in ['package = "nope"\n', "[package\n"]:
+            with self.subTest(toml=toml), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "Cargo.toml").write_text(toml, encoding="utf-8")
+                (root / "pyproject.toml").write_text(toml.replace("package", "project"), encoding="utf-8")
+                (root / "package.json").write_text('{"name":', encoding="utf-8")
+                (root / "README.md").write_text("# Still collected\n", encoding="utf-8")
+                result = self.run_script("--root", tmp, "--json")
+
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stderr, "")
+                payload = json.loads(result.stdout)
+                errors = {item["path"]: item for item in payload["errors"]}
+                self.assertEqual(set(errors), {"package.json", "Cargo.toml", "pyproject.toml"})
+                self.assertTrue(all(item["surface"] == "manifest" for item in errors.values()))
+                self.assertIn("invalid JSON", errors["package.json"]["reason"])
+                toml_reason = (
+                    "must be a TOML table" if '"nope"' in toml else "invalid TOML"
+                ) if module.tomllib else "tomllib unavailable on Python <3.11"
+                for filename in ["Cargo.toml", "pyproject.toml"]:
+                    self.assertIn(toml_reason, errors[filename]["reason"])
+                self.assertEqual(payload["readmes"][0]["first_heading"], "# Still collected")
+
+    def test_toml_tables_and_optional_sections_keep_existing_behavior(self) -> None:
+        module = load_script("repo_seo_baseline.py")
+        for cargo, python in [
+            ('[package]\ndescription = "Cargo demo"\n', '[project]\nname = "python-demo"\n'),
+            ("[package]\n", "[project]\n"),
+            ("[workspace]\n", "[tool.demo]\n"),
+            ("", ""),
+        ]:
+            with self.subTest(cargo=cargo, python=python), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "Cargo.toml").write_text(cargo, encoding="utf-8")
+                (root / "pyproject.toml").write_text(python, encoding="utf-8")
+                result = self.run_script("--root", tmp, "--json")
+
+                self.assertEqual(result.returncode, 0 if module.tomllib else 1)
+                self.assertEqual(result.stderr, "")
+                payload = json.loads(result.stdout)
+                if module.tomllib:
+                    self.assertEqual(payload["status"], "ok")
+                    self.assertEqual(payload["errors"], [])
+                    if "Cargo demo" in cargo:
+                        self.assertEqual(payload["manifests"]["cargo"]["description"], "Cargo demo")
+                        self.assertEqual(payload["manifests"]["python"]["name"], "python-demo")
+                else:
+                    self.assertEqual(len(payload["errors"]), 2)
+                    self.assertTrue(all("tomllib unavailable" in item["reason"] for item in payload["errors"]))
+
+    def test_issue_template_file_emits_json_and_fails_shipwise_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ["README.md", "LICENSE", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SECURITY.md"]:
+                (root / name).write_text("ok\n", encoding="utf-8")
+            issue_templates = root / ".github" / "ISSUE_TEMPLATE"
+            issue_templates.parent.mkdir()
+            issue_templates.write_text("regular file\n", encoding="utf-8")
+            project_yaml = root / "project.yaml"
+            project_yaml.write_text(
+                """discoverability:
+  description: "A repo seo helper"
+  primary_keyword: "repo seo"
+  keywords:
+    - "repo seo"
+  topics:
+    - "seo"
+    - "github"
+    - "developer-tools"
+    - "metadata"
+    - "open-source"
+  homepage_url: "https://example.com"
+  social_image_set: true
+""",
+                encoding="utf-8",
+            )
+            result = self.run_script("--root", tmp, "--project-yaml", str(project_yaml), "--json")
+
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stderr, "")
+            payload = json.loads(result.stdout)
+            self.assertFalse(payload["community_files"]["issue_templates"])
+            self.assertFalse(payload["shipwise"]["community_files"]["issue_templates"])
+            self.assertEqual(payload["status"], "error")
+            self.assertEqual(
+                {item["check"] for item in payload["errors"]}, {"issue_templates", "support_path"}
+            )
+            self.assertTrue(all(item["surface"] == "shipwise" for item in payload["errors"]))
+
+            issue_templates.unlink()
+            passing = self.run_script("--root", tmp, "--json")
+            self.assertEqual(passing.returncode, 0)
+            self.assertFalse(json.loads(passing.stdout)["community_files"]["issue_templates"])
+
+    def test_issue_template_presence_controls_keep_json_baseline(self) -> None:
+        for kind, expected in [("missing", False), ("file", False), ("empty_dir", False), ("dir", True)]:
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / ".github" / "ISSUE_TEMPLATE"
+                if kind == "file":
+                    path.parent.mkdir()
+                    path.write_text("regular file\n", encoding="utf-8")
+                elif kind in {"empty_dir", "dir"}:
+                    path.mkdir(parents=True)
+                    if kind == "dir":
+                        (path / "bug.md").write_text("# Bug\n", encoding="utf-8")
+                result = self.run_script("--root", tmp, "--json")
+
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.stderr, "")
+                payload = json.loads(result.stdout)
+                self.assertEqual(payload["community_files"]["issue_templates"], expected)
+                self.assertEqual(payload["errors"], [])
+
     def test_shipwise_project_yaml_gate_returns_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
