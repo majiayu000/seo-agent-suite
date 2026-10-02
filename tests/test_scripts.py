@@ -9,7 +9,10 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
@@ -32,6 +35,88 @@ def public_http_mod(module):
     return module.public_http
 
 
+class PublicHttpURLTests(unittest.TestCase):
+    def test_request_blocks_non_public_endpoints_before_connect(self) -> None:
+        module = load_script("public_http.py")
+        addresses = [
+            "64:ff9b::a9fe:a9fe",  # NAT64 link-local IPv4
+            "64:ff9b::7f00:1",  # NAT64 loopback IPv4
+            "64:ff9b::a00:1",  # NAT64 private IPv4
+            "64:ff9b::e000:1",  # NAT64 multicast IPv4
+            "64:ff9b::",  # NAT64 unspecified IPv4
+            "64:ff9b:1::1",  # Local-use NAT64 prefix
+            "fec0::1",
+            "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",  # Site-local upper bound
+            "224.0.0.1",
+            "239.255.255.250",
+            "ff02::1",
+            "::ffff:224.0.0.1",  # IPv4-mapped multicast
+            "10.0.0.1",
+            "127.0.0.1",
+            "169.254.169.254",
+            "::ffff:127.0.0.1",
+            "::",
+            "::1",
+            "fe80::1",
+            "100::1",  # Reserved IPv6
+        ]
+        public_endpoint = (module.socket.AF_INET, module.socket.SOCK_STREAM, 6, "", ("8.8.8.8", 80))
+        for address in addresses:
+            ipv6 = ":" in address
+            family = module.socket.AF_INET6 if ipv6 else module.socket.AF_INET
+            sockaddr = (address, 80, 0, 0) if ipv6 else (address, 80)
+            endpoint = (family, module.socket.SOCK_STREAM, 6, "", sockaddr)
+            literal_url = f"http://[{address}]/" if ipv6 else f"http://{address}/"
+            for url in (literal_url, "http://audit-target.example/"):
+                for endpoints in ([endpoint], [public_endpoint, endpoint]):
+                    with (
+                        self.subTest(address=address, url=url, mixed=len(endpoints) > 1),
+                        mock.patch.object(module.socket, "getaddrinfo", return_value=endpoints),
+                        mock.patch.object(module, "select_proxy", return_value=None),
+                        mock.patch.object(
+                            module, "connect_endpoint", side_effect=AssertionError("blocked connect")
+                        ) as connect_endpoint,
+                    ):
+                        with self.assertRaisesRegex(
+                            ValueError, "^URL resolves to a non-public address$"
+                        ):
+                            module.request_public_url_once(url, 1)
+                        connect_endpoint.assert_not_called()
+
+    def test_public_unicast_endpoints_remain_allowed(self) -> None:
+        module = load_script("public_http.py")
+        for address in ("8.8.8.8", "2606:4700:4700::1111", "::ffff:8.8.8.8", "64:ff9b::808:808"):
+            ipv6 = ":" in address
+            family = module.socket.AF_INET6 if ipv6 else module.socket.AF_INET
+            sockaddr = (address, 80, 0, 0) if ipv6 else (address, 80)
+            endpoints = [(family, module.socket.SOCK_STREAM, 6, "", sockaddr)]
+            with self.subTest(address=address), mock.patch.object(
+                module.socket, "getaddrinfo", return_value=endpoints
+            ):
+                parsed, validated = module.validate_public_http_url("http://public.example/")
+            self.assertEqual(parsed.hostname, "public.example")
+            self.assertEqual(validated, endpoints)
+
+    def test_audit_entrypoints_report_non_public_address_error(self) -> None:
+        for script, entrypoint in (("repo_seo_baseline.py", "http_check"), ("site_meta_audit.py", "fetch")):
+            module = load_script(script)
+            shared = public_http_mod(module)
+            for address in ("64:ff9b::a9fe:a9fe", "fec0::1", "ff02::1"):
+                endpoint = (shared.socket.AF_INET6, shared.socket.SOCK_STREAM, 6, "", (address, 80, 0, 0))
+                with (
+                    self.subTest(script=script, address=address),
+                    mock.patch.object(shared.socket, "getaddrinfo", return_value=[endpoint]),
+                    mock.patch.object(shared, "select_proxy", return_value=None),
+                    mock.patch.object(
+                        shared, "connect_endpoint", side_effect=AssertionError("blocked connect")
+                    ) as connect_endpoint,
+                ):
+                    result = getattr(module, entrypoint)("http://audit-target.example/")
+                    self.assertEqual(result["status"], "error")
+                    self.assertEqual(result["reason"], "URL resolves to a non-public address")
+                    connect_endpoint.assert_not_called()
+
+
 class RepoSeoBaselineTests(unittest.TestCase):
     def run_script(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -47,6 +132,143 @@ class RepoSeoBaselineTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must be an http(s) URL", result.stderr)
+
+    def test_cli_homepage_credentials_are_redacted_and_still_fail(self) -> None:
+        for authority in ("example.invalid:8443", "[2001:db8::1]:8443"):
+            for output_args in ((), ("--json",)):
+                with self.subTest(authority=authority, output_args=output_args), tempfile.TemporaryDirectory() as tmp:
+                    result = self.run_script(
+                        "--root", tmp, "--homepage",
+                        f"https://dummy-user:dummy-password@{authority}/docs/?view=full#section",
+                        *output_args,
+                    )
+
+                self.assertEqual(result.returncode, 1)
+                self.assertNotIn("dummy-user", result.stdout + result.stderr)
+                self.assertNotIn("dummy-password", result.stdout + result.stderr)
+                self.assertIn("URL credentials are not allowed", result.stdout)
+                if output_args:
+                    payload = json.loads(result.stdout)
+                    self.assertEqual(payload["status"], "error")
+                    self.assertEqual(list(payload["site"]), [f"https://{authority}/docs"])
+
+    def test_manifest_homepage_credentials_are_redacted_before_output(self) -> None:
+        module = load_script("repo_seo_baseline.py")
+        for manifest in ("package.json", "Cargo.toml"):
+            with self.subTest(manifest=manifest), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                homepage = "https://dummy-user:dummy-password@example.invalid/docs"
+                content = (
+                    json.dumps({"homepage": homepage}) if manifest == "package.json"
+                    else f'[package]\nhomepage = "{homepage}"\n'
+                )
+                (root / manifest).write_text(content, encoding="utf-8")
+                stdout = io.StringIO()
+                with (
+                    mock.patch.object(sys, "argv", ["repo_seo_baseline.py", "--root", tmp, "--json"]),
+                    mock.patch.object(sys, "stdout", stdout),
+                    mock.patch.object(module, "run_cmd", return_value={"status": "skipped"}),
+                    mock.patch.object(module.public_http.socket, "getaddrinfo") as resolve,
+                    mock.patch.object(module.public_http, "connect_endpoint") as connect,
+                ):
+                    code = module.main()
+
+            self.assertEqual(code, 1)
+            self.assertNotIn("dummy-user", stdout.getvalue())
+            self.assertNotIn("dummy-password", stdout.getvalue())
+            payload = json.loads(stdout.getvalue())
+            item = payload["manifests"]["npm"][0] if manifest == "package.json" else payload["manifests"]["cargo"]
+            self.assertEqual(item["homepage"], "https://example.invalid/docs")
+            self.assertEqual(payload["site"]["https://example.invalid/docs"]["homepage"]["status"], "error")
+            resolve.assert_not_called()
+            connect.assert_not_called()
+
+    def test_shipwise_homepage_credentials_fail_without_leaking_evidence(self) -> None:
+        module = load_script("repo_seo_baseline.py")
+        for userinfo in ("dummy-user:dummy-password", "dummy-user", ":dummy-password", ""):
+            with self.subTest(userinfo=userinfo), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                for name in ("README.md", "LICENSE", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SECURITY.md"):
+                    (root / name).write_text("ok\n", encoding="utf-8")
+                issue_dir = root / ".github" / "ISSUE_TEMPLATE"
+                issue_dir.mkdir(parents=True)
+                (issue_dir / "bug.md").write_text("ok\n", encoding="utf-8")
+                project_yaml = root / "project.yaml"
+                project_yaml.write_text(
+                    'discoverability:\n'
+                    '  description: "A repo seo helper"\n'
+                    '  primary_keyword: "repo seo"\n'
+                    '  keywords:\n    - "repo seo"\n'
+                    '  topics:\n    - "seo"\n    - "github"\n    - "developer-tools"\n    - "metadata"\n    - "open-source"\n'
+                    f'  homepage_url: "https://{userinfo}@example.invalid/docs"\n'
+                    '  social_image_set: true\n',
+                    encoding="utf-8",
+                )
+                evidence = module.evaluate_shipwise_project(root, project_yaml)
+                serialized = json.dumps(evidence)
+                result = self.run_script("--root", tmp, "--project-yaml", str(project_yaml), "--json")
+
+            self.assertEqual(result.returncode, 1)
+            payload = json.loads(result.stdout)
+            self.assertEqual(evidence["checks"]["homepage_url"]["status"], "error")
+            self.assertIn("credentials", evidence["checks"]["homepage_url"]["reason"])
+            self.assertEqual(evidence["checks"]["homepage_url"]["evidence"], "https://example.invalid/docs")
+            self.assertEqual(evidence["discoverability"]["homepage_url"], "https://example.invalid/docs")
+            self.assertEqual([key for key, value in evidence["checks"].items() if value["status"] == "error"], ["homepage_url"])
+            self.assertEqual(payload["errors"][0]["check"], "homepage_url")
+            self.assertNotIn("dummy-user", serialized + result.stdout + result.stderr)
+            self.assertNotIn("dummy-password", serialized + result.stdout + result.stderr)
+
+    def test_redacted_homepage_collision_preserves_credential_error(self) -> None:
+        module = load_script("repo_seo_baseline.py")
+
+        def request_once(url, *_args, **_kwargs):
+            module.validate_public_http_url(url)
+            return {"http_status": 200, "location": None, "content_type": "text/plain", "sample_bytes": 0, "body": b""}
+
+        for homepages in (
+            ["https://dummy-user:dummy-password@example.invalid/docs", "https://example.invalid/docs"],
+            ["https://example.invalid/docs", "https://dummy-user:dummy-password@example.invalid/docs"],
+        ):
+            with self.subTest(homepages=homepages), tempfile.TemporaryDirectory() as tmp:
+                stdout = io.StringIO()
+                argv = ["repo_seo_baseline.py", "--root", tmp, "--json"]
+                for homepage in homepages:
+                    argv.extend(["--homepage", homepage])
+                with (
+                    mock.patch.object(sys, "argv", argv),
+                    mock.patch.object(sys, "stdout", stdout),
+                    mock.patch.object(module, "run_cmd", return_value={"status": "skipped"}),
+                    mock.patch.object(module.public_http.socket, "getaddrinfo", return_value=[
+                        (module.public_http.socket.AF_INET, module.public_http.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+                    ]),
+                    mock.patch.object(module.public_http, "request_public_url_once", side_effect=request_once) as request,
+                ):
+                    code = module.main()
+
+            self.assertEqual(code, 1)
+            self.assertNotIn("dummy-password", stdout.getvalue())
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["site"]["https://example.invalid/docs"]["homepage"]["status"], "error")
+            self.assertEqual(request.call_count, 8)
+            expected_urls = []
+            for homepage in homepages:
+                origin = homepage.removesuffix("/docs")
+                expected_urls.extend([
+                    homepage,
+                    origin + "/robots.txt",
+                    origin + "/sitemap.xml",
+                    homepage + "/sitemap.xml",
+                ])
+            self.assertEqual([call.args[0] for call in request.call_args_list], expected_urls)
+
+    def test_invalid_homepage_scheme_diagnostic_redacts_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_script("--root", tmp, "--homepage", "ftp://dummy-user:dummy-password@example.invalid/docs")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("must be an http(s) URL", result.stderr)
+        self.assertNotIn("dummy-user", result.stderr)
+        self.assertNotIn("dummy-password", result.stderr)
 
     def test_toml_unavailable_is_marked_as_error(self) -> None:
         module = load_script("repo_seo_baseline.py")
@@ -299,6 +521,328 @@ discoverability:
 
         self.assertEqual(failed["checks"]["primary_keyword_in_description"]["status"], "error")
         self.assertEqual(failed["checks"]["topics_format"]["status"], "error")
+
+    def test_shipwise_cli_rejects_non_string_fields(self) -> None:
+        valid_fields = {
+            "description": '"A repo seo helper"',
+            "primary_keyword": '"repo seo"',
+            "homepage_url": '"https://example.com"',
+        }
+        invalid_values = [
+            '\n    - "A repo seo helper"',
+            "[]",
+            "[repo, seo]",
+            '["repo", "seo"]',
+            "[ repo, seo ]",
+            "[repo, {foo: bar}]",
+            "{}",
+            "{foo: bar}",
+            "{foo:bar}",
+            "{foo: [repo, seo]}",
+            "null",
+            "Null",
+            "NULL",
+            "~",
+            "true",
+            "True",
+            "TRUE",
+            "false",
+            "False",
+            "FALSE",
+            "123",
+            "1.5",
+            "+123",
+            "-123",
+            "0123",
+            "0o17",
+            "0xFF",
+            ".5",
+            "123.",
+            "+12e03",
+            "-2E+05",
+            ".inf",
+            "-.Inf",
+            "+.INF",
+            ".nan",
+            ".NaN",
+            ".NAN",
+            "1e999",
+            "-1e999",
+            "9" * 4301,
+            "123 # note",
+            "null # note",
+            "true # note",
+            "1e999 # note",
+            "9" * 4301 + " # note",
+            "!!int 123",
+            '!!int "123"',
+            "!!bool true",
+            "!!null null",
+            "!!float 1e999",
+            "!<tag:yaml.org,2002:int> 123",
+            "&value 123",
+            "&value !!int 123 # note",
+            "!!int &value 123 # note",
+            "&value [repo, seo] # note",
+            "!!map {foo: bar} # note",
+            "*numeric",
+            "*numeric # note",
+            "*text",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ["README.md", "LICENSE", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SECURITY.md"]:
+                (root / name).write_text("ok\n", encoding="utf-8")
+            issue_dir = root / ".github" / "ISSUE_TEMPLATE"
+            issue_dir.mkdir(parents=True)
+            (issue_dir / "bug.md").write_text("# Bug\n", encoding="utf-8")
+            project_yaml = root / "project.yaml"
+            tail = """  keywords:
+    - "repo seo"
+  topics:
+    - "seo"
+    - "github"
+    - "developer-tools"
+    - "metadata"
+    - "open-source"
+  social_image_set: true
+"""
+            for field in valid_fields:
+                for value in invalid_values:
+                    with self.subTest(field=field, value=value):
+                        fields = {**valid_fields, field: value}
+                        project_yaml.write_text(
+                            'value: &numeric 123\ntext: &text "repo seo"\ndiscoverability:\n'
+                            + "".join(f"  {key}: {item}\n" for key, item in fields.items())
+                            + tail,
+                            encoding="utf-8",
+                        )
+                        result = self.run_script(
+                            "--root", str(root), "--project-yaml", str(project_yaml), "--json"
+                        )
+                        self.assertEqual(result.returncode, 1, result.stderr)
+                        def reject_constant(value):
+                            raise ValueError(f"non-JSON constant: {value}")
+
+                        payload = json.loads(result.stdout, parse_constant=reject_constant)
+                        self.assertEqual(payload["status"], "error")
+                        check = payload["shipwise"]["checks"][field]
+                        self.assertEqual(check["status"], "error")
+                        self.assertEqual(check["reason"], f"discoverability.{field} must be a string")
+                        self.assertIn(
+                            {"surface": "shipwise", "check": field, "reason": check["reason"]},
+                            payload["errors"],
+                        )
+                        self.assertNotIsInstance(payload["shipwise"]["discoverability"][field], str)
+                        if field in {"description", "primary_keyword"}:
+                            alignment = payload["shipwise"]["checks"]["primary_keyword_in_description"]
+                            self.assertEqual(alignment["status"], "error")
+
+            project_yaml.write_text(
+                "discoverability:\n"
+                + "".join(f"  {key}: {value}\n" for key, value in valid_fields.items())
+                + tail,
+                encoding="utf-8",
+            )
+            valid = self.run_script("--root", str(root), "--project-yaml", str(project_yaml), "--json")
+            self.assertEqual(valid.returncode, 0, valid.stderr)
+            self.assertEqual(json.loads(valid.stdout)["errors"], [])
+
+    def test_shipwise_cli_rejects_null_and_numeric_keyword_alignment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ["README.md", "LICENSE", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SECURITY.md"]:
+                (root / name).write_text("ok\n", encoding="utf-8")
+            issue_dir = root / ".github" / "ISSUE_TEMPLATE"
+            issue_dir.mkdir(parents=True)
+            (issue_dir / "bug.md").write_text("# Bug\n", encoding="utf-8")
+            project_yaml = root / "project.yaml"
+            for value in ["null", "true", "123", "1.5", "+123", "0o17", "0xFF", ".5", "123.", ".inf", "[repo, seo]", "{foo: bar}", "123 # note", "!!int 123", "&value 123", "&value !!int 123 # note", '!!int "123"', "*numeric", "*numeric # note", "*text"]:
+                with self.subTest(value=value):
+                    project_yaml.write_text(
+                        f"""value: &numeric 123
+text: &text "repo seo"
+discoverability:
+  description: {value}
+  primary_keyword: {value}
+  keywords:
+    - "repo seo"
+  topics:
+    - "seo"
+    - "github"
+    - "developer-tools"
+    - "metadata"
+    - "open-source"
+  homepage_url: "https://example.com"
+  social_image_set: true
+""",
+                        encoding="utf-8",
+                    )
+                    for json_mode in [True, False]:
+                        with self.subTest(json_mode=json_mode):
+                            args = ["--root", str(root), "--project-yaml", str(project_yaml)]
+                            result = self.run_script(*args, *(["--json"] if json_mode else []))
+                            self.assertEqual(result.returncode, 1, result.stdout)
+                            if json_mode:
+                                payload = json.loads(result.stdout)
+                                self.assertEqual(payload["status"], "error")
+                                for field in ["description", "primary_keyword"]:
+                                    self.assertEqual(
+                                        payload["shipwise"]["checks"][field],
+                                        {
+                                            "status": "error",
+                                            "evidence": None,
+                                            "reason": f"discoverability.{field} must be a string",
+                                        },
+                                    )
+                            else:
+                                self.assertIn("status: error", result.stdout)
+                                self.assertIn("discoverability.description must be a string", result.stdout)
+                                self.assertIn("discoverability.primary_keyword must be a string", result.stdout)
+
+    def test_shipwise_cli_redacts_invalid_homepage_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_yaml = Path(tmp) / "project.yaml"
+            project_yaml.write_text(
+                'discoverability:\n'
+                '  description: "A repo seo helper"\n'
+                '  primary_keyword: "repo seo"\n'
+                '  homepage_url:\n'
+                '    - "https://synthetic-user:synthetic-password@example.invalid/docs"\n',
+                encoding="utf-8",
+            )
+            for output_args in ((), ("--json",)):
+                with self.subTest(output_args=output_args):
+                    result = self.run_script(
+                        "--root", tmp, "--project-yaml", str(project_yaml), *output_args,
+                    )
+                    self.assertEqual(result.returncode, 1)
+                    self.assertNotIn("synthetic-user", result.stdout + result.stderr)
+                    self.assertNotIn("synthetic-password", result.stdout + result.stderr)
+                    self.assertIn("discoverability.homepage_url must be a string", result.stdout)
+                    if output_args:
+                        payload = json.loads(result.stdout)
+                        self.assertIsNone(payload["shipwise"]["discoverability"]["homepage_url"])
+                        self.assertEqual(payload["shipwise"]["checks"]["homepage_url"]["status"], "error")
+
+    def test_shipwise_cli_reports_mixed_type_duplicate_topics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_yaml = Path(tmp) / "project.yaml"
+            project_yaml.write_text(
+                """discoverability:
+  description: "A repo seo helper"
+  primary_keyword: "repo seo"
+  homepage_url: "https://example.com"
+  keywords:
+    - "repo seo"
+  topics:
+    - 1
+    - 1
+    - "seo"
+    - "seo"
+    - "github"
+  social_image_set: true
+""",
+                encoding="utf-8",
+            )
+            result = self.run_script("--root", tmp, "--project-yaml", str(project_yaml), "--json")
+            self.assertEqual(result.returncode, 1, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["shipwise"]["checks"]["topics_format"]["status"], "error")
+            self.assertEqual(payload["shipwise"]["checks"]["topics_unique"]["status"], "error")
+            self.assertEqual(
+                {item["check"] for item in payload["errors"] if item["check"].startswith("topics_")},
+                {"topics_format", "topics_unique"},
+            )
+
+    def test_shipwise_cli_preserves_string_and_missing_field_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ["README.md", "LICENSE", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SECURITY.md"]:
+                (root / name).write_text("ok\n", encoding="utf-8")
+            issue_dir = root / ".github" / "ISSUE_TEMPLATE"
+            issue_dir.mkdir(parents=True)
+            (issue_dir / "bug.md").write_text("# Bug\n", encoding="utf-8")
+            project_yaml = root / "project.yaml"
+            fields = {
+                "description": '"A repo seo helper"',
+                "primary_keyword": '"repo seo"',
+                "homepage_url": '"https://example.com"',
+            }
+            tail = """  keywords:
+    - "repo seo"
+  topics:
+    - "seo"
+    - "github"
+    - "developer-tools"
+    - "metadata"
+    - "open-source"
+  social_image_set: true
+"""
+            for value in ["null", "true", "123", "1.5", "[repo, seo]", "{foo: bar}", "[repo, {foo: bar}]", "{foo: [repo, seo]}", "123 # note", "!!int 123", "&value 123", "*numeric", "repo *numeric"]:
+                with self.subTest(string=value):
+                    project_yaml.write_text(
+                        "discoverability:\n"
+                        + f'  description: "A {value} helper"\n  primary_keyword: "{value}"\n'
+                        + f'  homepage_url: {fields["homepage_url"]}\n'
+                        + tail,
+                        encoding="utf-8",
+                    )
+                    result = self.run_script("--root", str(root), "--project-yaml", str(project_yaml), "--json")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    payload = json.loads(result.stdout)
+                    self.assertEqual(payload["errors"], [])
+                    self.assertEqual(payload["shipwise"]["discoverability"]["primary_keyword"], value)
+                    self.assertEqual(payload["shipwise"]["discoverability"]["description"], f"A {value} helper")
+            for description, keyword, expected in [
+                ('"A repo # seo helper" # note', '"repo # seo" # note', "A repo # seo helper"),
+                ("'A repo # seo helper' # note", "'repo # seo' # note", "A repo # seo helper"),
+                ('&text "A repo seo helper" # note', '&keyword "repo seo" # note', "A repo seo helper"),
+                ("!!str 123 # note", "!!str 123 # note", "123"),
+                ('!!str &text "A repo seo helper"', '&keyword !!str "repo seo"', "A repo seo helper"),
+                ("!<tag:yaml.org,2002:str> 123", "!<tag:yaml.org,2002:str> 123", "123"),
+                ("! 123", "! 123", "123"),
+                ('"A repo seo helper"', '"repo seo"', "A repo seo helper"),
+                ("'A repo''s seo helper'", '"repo\'s seo"', "A repo's seo helper"),
+                ('"A repo\'s seo helper"', "'repo''s seo'", "A repo's seo helper"),
+                ("&text !!str 'A repo''s seo helper' # note", "!!str &keyword 'repo''s seo' # note", "A repo's seo helper"),
+                ("'A repo''''s seo helper'", '"repo\'\'s seo"', "A repo''s seo helper"),
+                (r"'A repo\n seo helper'", r"'repo\n seo'", r"A repo\n seo helper"),
+                ("'A *numeric helper' # note", "'*numeric' # note", "A *numeric helper"),
+            ]:
+                with self.subTest(description=description, keyword=keyword):
+                    project_yaml.write_text(
+                        "discoverability:\n"
+                        + f"  description: {description}\n  primary_keyword: {keyword}\n"
+                        + '  homepage_url: &homepage "https://example.com" # note\n'
+                        + tail,
+                        encoding="utf-8",
+                    )
+                    result = self.run_script("--root", str(root), "--project-yaml", str(project_yaml), "--json")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    payload = json.loads(result.stdout)
+                    self.assertEqual(payload["errors"], [])
+                    self.assertEqual(payload["shipwise"]["discoverability"]["description"], expected)
+                    self.assertEqual(payload["shipwise"]["discoverability"]["primary_keyword"], expected.removeprefix("A ").removesuffix(" helper"))
+                    self.assertEqual(payload["shipwise"]["discoverability"]["homepage_url"], "https://example.com")
+            for field in fields:
+                for missing in [True, False]:
+                    with self.subTest(field=field, missing=missing):
+                        values = {**fields, field: '\"\"'}
+                        if missing:
+                            del values[field]
+                        project_yaml.write_text(
+                            "discoverability:\n"
+                            + "".join(f"  {key}: {value}\n" for key, value in values.items())
+                            + tail,
+                            encoding="utf-8",
+                        )
+                        result = self.run_script(
+                            "--root", str(root), "--project-yaml", str(project_yaml), "--json"
+                        )
+                        self.assertEqual(result.returncode, 1, result.stderr)
+                        check = json.loads(result.stdout)["shipwise"]["checks"][field]
+                        self.assertEqual(check["reason"], f"missing discoverability.{field}")
 
     def test_shipwise_gate_rejects_duplicate_topics_and_each_missing_community_file(self) -> None:
         module = load_script("repo_seo_baseline.py")
@@ -937,6 +1481,493 @@ discoverability:
 
         self.assertEqual(errors[0]["resource"], "robots")
         self.assertEqual(errors[0]["reason"], "redirect blocked")
+
+
+class OriginResourceTests(unittest.TestCase):
+    @contextmanager
+    def http_site(self, routes):
+        paths = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                paths.append(self.path)
+                status, content_type, body = routes.get(
+                    self.path, (200, "text/html", "<html><title>Not found</title></html>")
+                )
+                payload = body.encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield f"http://crawl.example:{server.server_port}", paths, server.server_port
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def run_audit(self, name, homepage, port):
+        module = load_script(name)
+        shared = public_http_mod(module)
+        public_answer = [
+            (shared.socket.AF_INET, shared.socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ]
+
+        def connect_local(endpoint, timeout):
+            connection = shared.socket.socket(endpoint[0], endpoint[1], endpoint[2])
+            connection.settimeout(timeout)
+            connection.connect(("127.0.0.1", port))
+            return connection
+
+        with tempfile.TemporaryDirectory() as root:
+            args = [name, homepage, "--json"] if name == "site_meta_audit.py" else [
+                name, "--root", root, "--homepage", homepage, "--json"
+            ]
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(shared.socket, "getaddrinfo", return_value=public_answer),
+                mock.patch.object(shared, "connect_endpoint", side_effect=connect_local),
+                mock.patch.object(shared, "select_proxy", return_value=None),
+                mock.patch.object(sys, "argv", args),
+                mock.patch.object(sys, "stdout", stdout),
+            ):
+                if name == "repo_seo_baseline.py":
+                    with mock.patch.object(module, "run_cmd", return_value={"status": "ok"}):
+                        code = module.main()
+                else:
+                    code = module.main()
+            return code, json.loads(stdout.getvalue())
+
+    def test_sitemap_presence_requires_a_parsed_sitemap_root(self):
+        namespace = "http://www.sitemaps.org/schemas/sitemap/0.9"
+        bodies = (
+            (f'<sm:urlset xmlns:sm="{namespace}"><sm:url><sm:loc>https://example.com/</sm:loc></sm:url></sm:urlset>', True),
+            (f'<sm:sitemapindex xmlns:sm="{namespace}"/>', True),
+            (f'<?xml version="1.0"?>' + "<!-- preamble -->" * 80 + f'<urlset xmlns="{namespace}"/>', True),
+            ("not XML, but mentions <urlset></urlset>", False),
+            ("<urlset><url></urlset>", False),
+            ("<urlset>", False),
+            ("<urlset><url>", False),
+            ("<error><urlset/></error>", False),
+            ("<!-- <urlset/> --><error/>", False),
+            ("<urlset_fake/>", False),
+        )
+        for body, present in bodies:
+            for name in ("repo_seo_baseline.py", "site_meta_audit.py"):
+                routes = {
+                    "/robots.txt": (200, "text/plain", "User-agent: *\nDisallow:\n"),
+                    "/sitemap.xml": (200, "application/xml", body),
+                }
+                with self.subTest(body=body[:80], script=name), self.http_site(routes) as (origin, paths, port):
+                    code, payload = self.run_audit(name, origin, port)
+                    if name == "repo_seo_baseline.py":
+                        self.assertEqual(code, 0 if present else 1)
+                        item = payload["site"][origin]["sitemap"]
+                        self.assertEqual(item["status"], "ok" if present else "error")
+                        self.assertEqual(payload["status"], "ok" if present else "error")
+                        self.assertEqual({error["resource"] for error in payload["errors"]}, set() if present else {"sitemap"})
+                    else:
+                        self.assertEqual(code, 0)
+                        self.assertEqual(payload["checks"]["has_sitemap_xml"], present)
+                        item = payload["checks"]["sitemap_xml"][0]
+                    self.assertEqual(item["present"], present)
+                    self.assertNotIn("body", item)
+                    if not present:
+                        self.assertTrue(item["reason"])
+                    self.assertEqual(paths, ["/", "/robots.txt", "/sitemap.xml"])
+
+    def test_large_sitemap_sample_passes_both_audits(self):
+        namespace = "http://www.sitemaps.org/schemas/sitemap/0.9"
+        for root, child in (("urlset", "url"), ("sitemapindex", "sitemap")):
+            entry = f"<sm:{child}><sm:loc>https://example.com/page</sm:loc></sm:{child}>"
+            body = f'<sm:{root} xmlns:sm="{namespace}">' + entry * 18000 + f"</sm:{root}>"
+            self.assertGreater(len(body.encode("utf-8")), 1_000_000)
+            routes = {
+                "/robots.txt": (200, "text/plain", "User-agent: *\nDisallow:\n"),
+                "/sitemap.xml": (200, "application/xml", body),
+            }
+            for name in ("repo_seo_baseline.py", "site_meta_audit.py"):
+                with self.subTest(root=root, script=name), self.http_site(routes) as (origin, paths, port):
+                    code, payload = self.run_audit(name, origin, port)
+                    self.assertEqual(code, 0)
+                    if name == "repo_seo_baseline.py":
+                        item = payload["site"][origin]["sitemap"]
+                        self.assertEqual(item["status"], "ok")
+                        self.assertEqual(payload["errors"], [])
+                    else:
+                        self.assertTrue(payload["checks"]["has_sitemap_xml"])
+                        item = payload["checks"]["sitemap_xml"][0]
+                    self.assertTrue(item["present"])
+                    self.assertNotIn("body", item)
+                    self.assertEqual(paths, ["/", "/robots.txt", "/sitemap.xml"])
+
+    def test_sitemap_byte_limit_distinguishes_eof_from_truncation(self):
+        for size, closing, present in (
+            (999_999, "</urlset>", True),
+            (1_000_000, "</urlset>", True),
+            (1_000_001, "</urlset>", True),
+            (1_000_000, "", False),
+        ):
+            body = "<urlset>" + " " * (size - len("<urlset>" + closing)) + closing
+            routes = {
+                "/robots.txt": (200, "text/plain", "User-agent: *\nDisallow:\n"),
+                "/sitemap.xml": (200, "application/xml", body),
+            }
+            for name in ("repo_seo_baseline.py", "site_meta_audit.py"):
+                with self.subTest(size=size, present=present, script=name), self.http_site(routes) as (origin, paths, port):
+                    code, payload = self.run_audit(name, origin, port)
+                    if name == "repo_seo_baseline.py":
+                        self.assertEqual(code, 0 if present else 1)
+                        item = payload["site"][origin]["sitemap"]
+                    else:
+                        self.assertEqual(code, 0)
+                        self.assertEqual(payload["checks"]["has_sitemap_xml"], present)
+                        item = payload["checks"]["sitemap_xml"][0]
+                    self.assertEqual(item["present"], present)
+                    self.assertEqual(item["body_truncated"], size > 1_000_000)
+                    self.assertNotIn("body", item)
+                    self.assertEqual(paths, ["/", "/robots.txt", "/sitemap.xml"])
+
+    def test_document_homepage_finds_sibling_sitemap(self):
+        routes = {
+            "/robots.txt": (200, "text/plain", "User-agent: *\nDisallow:\n"),
+            "/sitemap.xml": (404, "text/plain", "missing"),
+            "/docs/sitemap.xml": (200, "application/xml", "<urlset/>"),
+        }
+        for path in ("/docs/index.html", "/docs/start"):
+            for name in ("repo_seo_baseline.py", "site_meta_audit.py"):
+                with self.subTest(path=path, script=name), self.http_site(routes) as (origin, paths, port):
+                    code, payload = self.run_audit(name, origin + path, port)
+                    self.assertEqual(code, 0)
+                    if name == "repo_seo_baseline.py":
+                        item = payload["site"][origin + path]["sitemap"]
+                        self.assertEqual(item["status"], "ok")
+                        self.assertEqual(payload["errors"], [])
+                    else:
+                        self.assertTrue(payload["checks"]["has_sitemap_xml"])
+                        item = next(item for item in payload["checks"]["sitemap_xml"] if item["present"])
+                    self.assertEqual(item["url"], origin + "/docs/sitemap.xml")
+                    self.assertEqual(paths, [path, "/robots.txt", "/sitemap.xml", "/docs/sitemap.xml", path + "/sitemap.xml"])
+
+    def test_project_sitemap_can_succeed_after_an_invalid_origin_candidate(self):
+        for path in ("/project/", "/project"):
+            for root_sitemap in (
+                (404, "text/plain", "missing"),
+                (200, "text/html", "<html>missing</html>"),
+                (200, "application/xml", "<error/>"),
+            ):
+                for name in ("repo_seo_baseline.py", "site_meta_audit.py"):
+                    routes = {
+                        "/robots.txt": (200, "text/plain", "User-agent: *\nDisallow:\n"),
+                        "/sitemap.xml": root_sitemap,
+                        "/project/sitemap.xml": (200, "application/xml", "<urlset/>"),
+                    }
+                    with self.subTest(path=path, root_sitemap=root_sitemap, script=name), self.http_site(routes) as (origin, paths, port):
+                        code, payload = self.run_audit(name, origin + path, port)
+                        self.assertEqual(code, 0)
+                        if name == "repo_seo_baseline.py":
+                            item = payload["site"][origin + path.rstrip("/")]["sitemap"]
+                            self.assertEqual(payload["errors"], [])
+                            self.assertEqual(item["status"], "ok")
+                        else:
+                            self.assertTrue(payload["checks"]["has_sitemap_xml"])
+                            first, item = payload["checks"]["sitemap_xml"]
+                            self.assertFalse(first["present"])
+                        self.assertTrue(item["present"])
+                        self.assertEqual(item["url"], origin + "/project/sitemap.xml")
+                        expected_page = path.rstrip("/") if name == "repo_seo_baseline.py" else path
+                        self.assertEqual(paths, [expected_page, "/robots.txt", "/sitemap.xml", "/project/sitemap.xml"])
+
+    def test_docs_sitemap_is_valid_but_docs_robots_cannot_replace_origin_robots(self):
+        routes = {
+            "/robots.txt": (404, "text/plain", "missing"),
+            "/sitemap.xml": (404, "text/plain", "missing"),
+            "/docs/robots.txt": (200, "text/plain", "User-agent: *\nDisallow:\n"),
+            "/docs/sitemap.xml": (200, "application/xml", "<urlset></urlset>"),
+        }
+        for name in ("repo_seo_baseline.py", "site_meta_audit.py"):
+            with self.subTest(script=name), self.http_site(routes) as (origin, paths, port):
+                code, payload = self.run_audit(name, origin + "/docs/", port)
+                if name == "repo_seo_baseline.py":
+                    self.assertEqual(code, 1)
+                    self.assertEqual({item["resource"] for item in payload["errors"]}, {"robots"})
+                    self.assertEqual(payload["site"][origin + "/docs"]["sitemap"]["url"], origin + "/docs/sitemap.xml")
+                else:
+                    self.assertEqual(code, 0)  # Metadata CLI keeps its existing page-status exit contract.
+                    self.assertFalse(payload["checks"]["has_robots_txt"])
+                    self.assertTrue(payload["checks"]["has_sitemap_xml"])
+                expected_page = "/docs" if name == "repo_seo_baseline.py" else "/docs/"
+                self.assertEqual(paths, [expected_page, "/robots.txt", "/sitemap.xml", "/docs/sitemap.xml"])
+
+    def test_origin_resources_pass_for_docs_and_pathless_homepages(self):
+        routes = {
+            "/robots.txt": (200, "text/plain", "User-agent: *\nDisallow:\n"),
+            "/sitemap.xml": (200, "application/xml", '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></sitemapindex>'),
+        }
+        for name in ("repo_seo_baseline.py", "site_meta_audit.py"):
+            for path in ("/docs/", ""):
+                with self.subTest(script=name, path=path), self.http_site(routes) as (origin, paths, port):
+                    code, payload = self.run_audit(name, origin + path, port)
+                    self.assertEqual(code, 0)
+                    if name == "repo_seo_baseline.py":
+                        checks = payload["site"][origin + path.rstrip("/")]
+                        self.assertEqual(checks["robots"]["status"], "ok")
+                        self.assertEqual(checks["sitemap"]["status"], "ok")
+                    else:
+                        checks = payload["checks"]
+                        self.assertTrue(checks["has_robots_txt"])
+                        self.assertTrue(checks["has_sitemap_xml"])
+                        self.assertEqual(len(checks["robots_txt"]), 1)
+                        self.assertEqual(len(checks["sitemap_xml"]), 2 if path else 1)
+                    expected_page = path.rstrip("/") or "/" if name == "repo_seo_baseline.py" else path or "/"
+                    expected_paths = [expected_page, "/robots.txt", "/sitemap.xml"]
+                    if path:
+                        expected_paths.append("/docs/sitemap.xml")
+                    self.assertEqual(paths, expected_paths)
+
+    def test_soft_404_and_non_sitemap_xml_fail_baseline_gate(self):
+        for robots, sitemap in (
+            ((200, "text/html", "<html>missing</html>"), (200, "text/html", "<html>missing</html>")),
+            ((200, "text/plain", "<html>missing</html>"), (200, "application/xml", "<error>missing</error>")),
+            ((204, "text/plain", ""), (204, "application/xml", "")),
+        ):
+            routes = {"/robots.txt": robots, "/sitemap.xml": sitemap}
+            with self.subTest(robots=robots, sitemap=sitemap), self.http_site(routes) as (origin, paths, port):
+                code, payload = self.run_audit("repo_seo_baseline.py", origin, port)
+                self.assertEqual(code, 1)
+                checks = payload["site"][origin]
+                for resource in ("robots", "sitemap"):
+                    self.assertEqual(checks[resource]["status"], "error")
+                    self.assertFalse(checks[resource]["present"])
+                    self.assertTrue(checks[resource]["reason"])
+                    self.assertNotIn("body", checks[resource])
+                self.assertEqual({item["resource"] for item in payload["errors"]}, {"robots", "sitemap"})
+
+    def test_resource_candidates_keep_authority_and_drop_query_and_fragment(self):
+        module = load_script("site_meta_audit.py")
+        for homepage, origin in (
+            ("https://example.com", "https://example.com"),
+            ("https://example.com/docs/page?lang=en#intro", "https://example.com"),
+            ("http://example.com:8080/docs/", "http://example.com:8080"),
+            ("https://[2606:4700:4700::1111]:8443/docs/", "https://[2606:4700:4700::1111]:8443"),
+        ):
+            for filename in ("robots.txt", "sitemap.xml"):
+                with self.subTest(homepage=homepage, filename=filename):
+                    expected = [origin + "/" + filename]
+                    if filename == "sitemap.xml" and "/docs" in homepage:
+                        path = "/docs/page" if "page?" in homepage else "/docs"
+                        if "page?" in homepage:
+                            expected.append(origin + "/docs/sitemap.xml")
+                        expected.append(origin + path + "/sitemap.xml")
+                    self.assertEqual(module.resource_candidates(homepage, filename), expected)
+
+    def test_origin_resource_fetches_preserve_public_url_validation(self):
+        for name in ("repo_seo_baseline.py", "site_meta_audit.py"):
+            module = load_script(name)
+            shared = public_http_mod(module)
+            private_answer = [
+                (shared.socket.AF_INET, shared.socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))
+            ]
+            for homepage, reason in (
+                ("http://private.example/docs/", "non-public"),
+                ("http://dummy:dummy@public.example/docs/", "credentials"),
+            ):
+                with (
+                    self.subTest(script=name, homepage=homepage),
+                    mock.patch.object(shared.socket, "getaddrinfo", return_value=private_answer) as dns,
+                    mock.patch.object(shared, "connect_endpoint") as connect,
+                ):
+                    items = module.site_resource_checks(homepage).values() if name == "repo_seo_baseline.py" else (
+                        module.check_candidates(homepage, "robots.txt") + module.check_candidates(homepage, "sitemap.xml")
+                    )
+                    for item in items:
+                        self.assertEqual(item["status"], "error")
+                        self.assertIn(reason, item["reason"])
+                        self.assertNotIn("body", item)
+                    connect.assert_not_called()
+                    if reason == "credentials":
+                        dns.assert_not_called()
+
+
+class RegistryPackageNameTests(unittest.TestCase):
+    def audit(self, root: Path, *args: str):
+        module = load_script("repo_seo_baseline.py")
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", ["repo_seo_baseline.py", "--root", str(root), *args]),
+            mock.patch.object(sys, "stdout", stdout),
+            mock.patch.object(module, "run_cmd", return_value={"status": "ok"}) as run_cmd,
+        ):
+            code = module.main()
+        return code, stdout.getvalue(), [call.args[0] for call in run_cmd.call_args_list]
+
+    def test_manifest_flags_are_errors_and_never_reach_registry_commands(self) -> None:
+        npm_flag = "--registry=http://127.0.0.1:9"
+        cargo_flag = "--index=sparse+http://127.0.0.1:9/"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text('{"name":"demo"}', encoding="utf-8")
+            nested = root / "nested"
+            nested.mkdir()
+            (nested / "package.json").write_text(json.dumps({"name": npm_flag}), encoding="utf-8")
+            (root / "Cargo.toml").write_text(f'[package]\nname = "{cargo_flag}"\n', encoding="utf-8")
+
+            code, output, commands = self.audit(root, "--json")
+
+        self.assertNotIn(npm_flag, [arg for command in commands for arg in command])
+        self.assertNotIn(cargo_flag, [arg for command in commands for arg in command])
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(set(payload["registry"]["npm"]), {"demo"})
+        self.assertEqual(payload["registry"]["crates"], {})
+        self.assertEqual(
+            {error["path"] for error in payload["manifests"]["errors"]},
+            {"nested/package.json", "Cargo.toml"},
+        )
+        self.assertTrue(all(error["surface"] == "manifest" for error in payload["errors"]))
+
+    def test_invalid_manifest_name_types_and_syntax_fail_without_registry_calls(self) -> None:
+        invalid_npm = [
+            1, 0, True, False, None, ["demo"], {"name": "demo"}, "", " demo", "demo ",
+            "demo\n", ".demo", "_demo", "demo@1", "https://example.com",
+            "@scope/", "scope/demo", "@scope/demo/extra", "@scope/.foo", "@scope/..foo",
+            "@scope/..", "démø", "a" * 215,
+        ]
+        invalid_cargo = [
+            1, 0, True, False, ["demo"], {"name": "demo"}, "", " demo", "demo ", "demo\n",
+            "-demo", "_demo", "1demo", "demo@1", "demo.crate", "démø", "a" * 65,
+        ]
+        for registry, names in (("npm", invalid_npm), ("cargo", invalid_cargo)):
+            for name in names:
+                with self.subTest(registry=registry, name=name), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    if registry == "npm":
+                        path = "package.json"
+                        (root / path).write_text(json.dumps({"name": name}), encoding="utf-8")
+                    else:
+                        path = "Cargo.toml"
+                        value = '{name = "demo"}' if isinstance(name, dict) else json.dumps(name)
+                        (root / path).write_text(f"[package]\nname = {value}\n", encoding="utf-8")
+                    code, output, commands = self.audit(root, "--json")
+
+                self.assertFalse(any(command[0] in {"npm", "cargo"} for command in commands))
+                self.assertEqual(code, 1)
+                payload = json.loads(output)
+                self.assertEqual(payload["status"], "error")
+                self.assertEqual(payload["manifests"]["errors"][0]["path"], path)
+                self.assertEqual(payload["errors"][0]["surface"], "manifest")
+                self.assertIn("package name", payload["errors"][0]["reason"])
+
+    def test_invalid_cli_names_use_the_structured_error_gate(self) -> None:
+        for flag, name in (
+            ("--npm", "--registry=http://127.0.0.1:9"),
+            ("--crate", "--index=sparse+http://127.0.0.1:9/"),
+            ("--npm", "demo@1"),
+            ("--npm", "@scope/.foo"),
+            ("--crate", "demo.crate"),
+            ("--npm", ""),
+            ("--crate", ""),
+        ):
+            for output_mode in ([], ["--json"]):
+                with self.subTest(flag=flag, name=name, mode=output_mode), tempfile.TemporaryDirectory() as tmp:
+                    code, output, commands = self.audit(Path(tmp), f"{flag}={name}", *output_mode)
+                self.assertFalse(any(command[0] in {"npm", "cargo"} for command in commands))
+                self.assertEqual(code, 1)
+                if output_mode:
+                    payload = json.loads(output)
+                    self.assertEqual(payload["status"], "error")
+                    self.assertEqual(payload["manifests"]["errors"][0]["path"], flag)
+                else:
+                    self.assertIn("status: error", output)
+                    self.assertIn("package name", output)
+
+    def test_valid_names_are_deduplicated_and_passed_as_operands(self) -> None:
+        npm_names = [
+            "demo", "@scope/demo", "demo.js", "demo_name", "-foo", "--registry",
+            "JSONStream", "214" + "a" * 211,
+            "foo~bar", "foo'bar", "foo!bar", "foo(bar)", "foo*bar",
+            "!foo", "~foo", "*foo", "(foo)", "'foo",
+            "@scope/foo!bar", "@scope/~foo", "@scope/*", "@~scope/foo",
+        ]
+        cargo_names = ["demo-crate", "Demo_crate", "a" * 64]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text('{"name":"JSONStream"}', encoding="utf-8")
+            (root / "Cargo.toml").write_text('[package]\nname = "demo-crate"\n', encoding="utf-8")
+            args = [f"--npm={name}" for name in npm_names]
+            args += [f"--crate={name}" for name in cargo_names]
+            code, output, commands = self.audit(root, *args, "--json")
+
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["manifests"]["errors"], [])
+        self.assertEqual(set(payload["registry"]["npm"]), set(npm_names))
+        self.assertEqual(set(payload["registry"]["crates"]), set(cargo_names))
+        self.assertEqual(
+            [command for command in commands if command[0] == "npm"],
+            [["npm", "view", "--json", "--", name] for name in npm_names],
+        )
+        self.assertEqual(
+            [command for command in commands if command[0] == "cargo"],
+            [["cargo", "search", "--limit", "3", "--", name] for name in cargo_names],
+        )
+
+    def test_unnamed_npm_projects_and_cargo_workspaces_remain_optional(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text('{}', encoding="utf-8")
+            (root / "Cargo.toml").write_text('[workspace]\nmembers = []\n', encoding="utf-8")
+            code, output, commands = self.audit(root, "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output)["manifests"]["errors"], [])
+        self.assertFalse(any(command[0] in {"npm", "cargo"} for command in commands))
+
+    def test_invalid_names_preserve_metadata_and_homepage_audits(self) -> None:
+        module = load_script("repo_seo_baseline.py")
+        stdout = io.StringIO()
+        npm_homepage = "https://npm-site.example"
+        cargo_homepage = "https://cargo-site.example"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text(json.dumps({
+                "name": "--registry=http://127.0.0.1:9", "homepage": npm_homepage,
+                "description": "npm metadata", "keywords": ["seo"],
+            }), encoding="utf-8")
+            (root / "Cargo.toml").write_text(
+                '[package]\nname = "--index=sparse+http://127.0.0.1:9/"\n'
+                f'homepage = "{cargo_homepage}"\ndescription = "cargo metadata"\n',
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(sys, "argv", ["repo_seo_baseline.py", "--root", tmp, "--json"]),
+                mock.patch.object(sys, "stdout", stdout),
+                mock.patch.object(module, "run_cmd", return_value={"status": "ok"}) as run_cmd,
+                mock.patch.object(module, "site_resource_checks", return_value={
+                    "homepage": {"status": "ok"}, "robots": {"status": "ok"}, "sitemap": {"status": "ok"},
+                }) as site_checks,
+            ):
+                code = module.main()
+
+        self.assertEqual(code, 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(len(payload["manifests"]["npm"]), 1)
+        self.assertEqual(payload["manifests"]["npm"][0]["description"], "npm metadata")
+        self.assertEqual(payload["manifests"]["npm"][0]["keywords"], ["seo"])
+        self.assertEqual(payload["manifests"]["cargo"]["description"], "cargo metadata")
+        self.assertEqual(set(payload["site"]), {npm_homepage, cargo_homepage})
+        self.assertEqual({call.args[0] for call in site_checks.call_args_list}, {npm_homepage, cargo_homepage})
+        self.assertFalse(any(call.args[0][0] in {"npm", "cargo"} for call in run_cmd.call_args_list))
+        self.assertEqual(len(payload["manifests"]["errors"]), 2)
 
 
 class SiteMetaAuditTests(unittest.TestCase):
