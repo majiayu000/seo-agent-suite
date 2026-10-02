@@ -252,12 +252,43 @@ def infer_homepages(manifests: dict) -> list[str]:
 
 def parse_scalar(value: str) -> object:
     value = value.strip()
+    tag = None
+    # Properties precede scalar content; quoted property/comment characters
+    # remain literal text rather than participating in type classification.
+    while match := re.match(r"(!\S*|&\S+)(?:\s+|$)", value):
+        property_value = match.group(1)
+        if property_value.startswith("!"):
+            tag = property_value
+        value = value[match.end():]
+    if tag is not None and tag not in {"!", "!!str", "!<tag:yaml.org,2002:str>"}:
+        return None
+    quoted = re.fullmatch(r'''("(?:[^"\\]|\\.)*"|'(?:[^']|'')*')(?:\s+#.*)?''', value)
+    if quoted:
+        literal = quoted.group(1)
+        content = literal[1:-1]
+        return content.replace("''", "'") if literal.startswith("'") else content
+    value = re.split(r"(?:^|\s+)#", value, maxsplit=1)[0].rstrip()
+    # Aliases cannot be typed without resolving the document's anchors.
+    if value.startswith("*"):
+        return None
+    if value.startswith(("[", "{")):
+        return [] if value == "[]" else None
+    if tag is not None:
+        return value
     if value in {"[]", ""}:
         return [] if value == "[]" else ""
-    if value in {"true", "false"}:
-        return value == "true"
-    if value.startswith('"') and value.endswith('"'):
-        return value[1:-1]
+    if value in {"true", "True", "TRUE", "false", "False", "FALSE"}:
+        return value.lower() == "true"
+    if value in {"null", "Null", "NULL", "~"}:
+        return None
+    # Numeric values are invalid for this gate; classify YAML 1.2 core forms
+    # without creating huge integers or non-finite, non-JSON floats.
+    if re.fullmatch(
+        r"[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?"
+        r"|0o[0-7]+|0x[0-9a-fA-F]+|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)",
+        value,
+    ):
+        return None
     return value
 
 
@@ -323,15 +354,26 @@ def evaluate_shipwise_project(root: Path, project_yaml: Path) -> dict:
     discoverability = parse_shipwise_discoverability(project_yaml)
     topics = discoverability.get("topics")
     keywords = discoverability.get("keywords")
-    homepage = discoverability.get("homepage_url")
-    primary_keyword = str(discoverability.get("primary_keyword") or "").strip()
-    description = str(discoverability.get("description") or "").strip()
+    text_fields = {
+        field: discoverability.get(field, "")
+        for field in ("description", "primary_keyword", "homepage_url")
+    }
+    type_errors = {}
+    for field, value in text_fields.items():
+        if not isinstance(value, str):
+            type_errors[field] = check_item(False, None, f"discoverability.{field} must be a string")
+            text_fields[field] = ""
+            if field == "homepage_url":
+                discoverability[field] = None
+    homepage = text_fields["homepage_url"]
+    primary_keyword = text_fields["primary_keyword"].strip()
+    description = text_fields["description"].strip()
 
     if not isinstance(topics, list):
         topics = []
     if not isinstance(keywords, list):
         keywords = []
-    normalized_homepage = normalize_homepage(str(homepage or ""), strict=bool(homepage), label="discoverability.homepage_url")
+    normalized_homepage = normalize_homepage(homepage, strict=bool(homepage), label="discoverability.homepage_url")
     homepage_has_credentials = False
     if normalized_homepage:
         parsed_homepage = urllib.parse.urlparse(normalized_homepage)
@@ -344,7 +386,7 @@ def evaluate_shipwise_project(root: Path, project_yaml: Path) -> dict:
         item for item in topics
         if not isinstance(item, str) or re.fullmatch(r"[a-z0-9-]{1,50}", item) is None
     ]
-    duplicate_topics = sorted({item for item in topics if topics.count(item) > 1})
+    duplicate_topics = sorted({item for item in topics if topics.count(item) > 1}, key=str)
     repeated_primary = (
         description.lower().count(primary_keyword.lower()) > 1 if primary_keyword and description else False
     )
@@ -393,6 +435,8 @@ def evaluate_shipwise_project(root: Path, project_yaml: Path) -> dict:
             "support path requires both issue templates and CONTRIBUTING",
         ),
     }
+
+    checks.update(type_errors)
 
     return {
         "project_yaml": str(project_yaml),

@@ -382,6 +382,328 @@ discoverability:
         self.assertEqual(failed["checks"]["primary_keyword_in_description"]["status"], "error")
         self.assertEqual(failed["checks"]["topics_format"]["status"], "error")
 
+    def test_shipwise_cli_rejects_non_string_fields(self) -> None:
+        valid_fields = {
+            "description": '"A repo seo helper"',
+            "primary_keyword": '"repo seo"',
+            "homepage_url": '"https://example.com"',
+        }
+        invalid_values = [
+            '\n    - "A repo seo helper"',
+            "[]",
+            "[repo, seo]",
+            '["repo", "seo"]',
+            "[ repo, seo ]",
+            "[repo, {foo: bar}]",
+            "{}",
+            "{foo: bar}",
+            "{foo:bar}",
+            "{foo: [repo, seo]}",
+            "null",
+            "Null",
+            "NULL",
+            "~",
+            "true",
+            "True",
+            "TRUE",
+            "false",
+            "False",
+            "FALSE",
+            "123",
+            "1.5",
+            "+123",
+            "-123",
+            "0123",
+            "0o17",
+            "0xFF",
+            ".5",
+            "123.",
+            "+12e03",
+            "-2E+05",
+            ".inf",
+            "-.Inf",
+            "+.INF",
+            ".nan",
+            ".NaN",
+            ".NAN",
+            "1e999",
+            "-1e999",
+            "9" * 4301,
+            "123 # note",
+            "null # note",
+            "true # note",
+            "1e999 # note",
+            "9" * 4301 + " # note",
+            "!!int 123",
+            '!!int "123"',
+            "!!bool true",
+            "!!null null",
+            "!!float 1e999",
+            "!<tag:yaml.org,2002:int> 123",
+            "&value 123",
+            "&value !!int 123 # note",
+            "!!int &value 123 # note",
+            "&value [repo, seo] # note",
+            "!!map {foo: bar} # note",
+            "*numeric",
+            "*numeric # note",
+            "*text",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ["README.md", "LICENSE", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SECURITY.md"]:
+                (root / name).write_text("ok\n", encoding="utf-8")
+            issue_dir = root / ".github" / "ISSUE_TEMPLATE"
+            issue_dir.mkdir(parents=True)
+            (issue_dir / "bug.md").write_text("# Bug\n", encoding="utf-8")
+            project_yaml = root / "project.yaml"
+            tail = """  keywords:
+    - "repo seo"
+  topics:
+    - "seo"
+    - "github"
+    - "developer-tools"
+    - "metadata"
+    - "open-source"
+  social_image_set: true
+"""
+            for field in valid_fields:
+                for value in invalid_values:
+                    with self.subTest(field=field, value=value):
+                        fields = {**valid_fields, field: value}
+                        project_yaml.write_text(
+                            'value: &numeric 123\ntext: &text "repo seo"\ndiscoverability:\n'
+                            + "".join(f"  {key}: {item}\n" for key, item in fields.items())
+                            + tail,
+                            encoding="utf-8",
+                        )
+                        result = self.run_script(
+                            "--root", str(root), "--project-yaml", str(project_yaml), "--json"
+                        )
+                        self.assertEqual(result.returncode, 1, result.stderr)
+                        def reject_constant(value):
+                            raise ValueError(f"non-JSON constant: {value}")
+
+                        payload = json.loads(result.stdout, parse_constant=reject_constant)
+                        self.assertEqual(payload["status"], "error")
+                        check = payload["shipwise"]["checks"][field]
+                        self.assertEqual(check["status"], "error")
+                        self.assertEqual(check["reason"], f"discoverability.{field} must be a string")
+                        self.assertIn(
+                            {"surface": "shipwise", "check": field, "reason": check["reason"]},
+                            payload["errors"],
+                        )
+                        self.assertNotIsInstance(payload["shipwise"]["discoverability"][field], str)
+                        if field in {"description", "primary_keyword"}:
+                            alignment = payload["shipwise"]["checks"]["primary_keyword_in_description"]
+                            self.assertEqual(alignment["status"], "error")
+
+            project_yaml.write_text(
+                "discoverability:\n"
+                + "".join(f"  {key}: {value}\n" for key, value in valid_fields.items())
+                + tail,
+                encoding="utf-8",
+            )
+            valid = self.run_script("--root", str(root), "--project-yaml", str(project_yaml), "--json")
+            self.assertEqual(valid.returncode, 0, valid.stderr)
+            self.assertEqual(json.loads(valid.stdout)["errors"], [])
+
+    def test_shipwise_cli_rejects_null_and_numeric_keyword_alignment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ["README.md", "LICENSE", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SECURITY.md"]:
+                (root / name).write_text("ok\n", encoding="utf-8")
+            issue_dir = root / ".github" / "ISSUE_TEMPLATE"
+            issue_dir.mkdir(parents=True)
+            (issue_dir / "bug.md").write_text("# Bug\n", encoding="utf-8")
+            project_yaml = root / "project.yaml"
+            for value in ["null", "true", "123", "1.5", "+123", "0o17", "0xFF", ".5", "123.", ".inf", "[repo, seo]", "{foo: bar}", "123 # note", "!!int 123", "&value 123", "&value !!int 123 # note", '!!int "123"', "*numeric", "*numeric # note", "*text"]:
+                with self.subTest(value=value):
+                    project_yaml.write_text(
+                        f"""value: &numeric 123
+text: &text "repo seo"
+discoverability:
+  description: {value}
+  primary_keyword: {value}
+  keywords:
+    - "repo seo"
+  topics:
+    - "seo"
+    - "github"
+    - "developer-tools"
+    - "metadata"
+    - "open-source"
+  homepage_url: "https://example.com"
+  social_image_set: true
+""",
+                        encoding="utf-8",
+                    )
+                    for json_mode in [True, False]:
+                        with self.subTest(json_mode=json_mode):
+                            args = ["--root", str(root), "--project-yaml", str(project_yaml)]
+                            result = self.run_script(*args, *(["--json"] if json_mode else []))
+                            self.assertEqual(result.returncode, 1, result.stdout)
+                            if json_mode:
+                                payload = json.loads(result.stdout)
+                                self.assertEqual(payload["status"], "error")
+                                for field in ["description", "primary_keyword"]:
+                                    self.assertEqual(
+                                        payload["shipwise"]["checks"][field],
+                                        {
+                                            "status": "error",
+                                            "evidence": None,
+                                            "reason": f"discoverability.{field} must be a string",
+                                        },
+                                    )
+                            else:
+                                self.assertIn("status: error", result.stdout)
+                                self.assertIn("discoverability.description must be a string", result.stdout)
+                                self.assertIn("discoverability.primary_keyword must be a string", result.stdout)
+
+    def test_shipwise_cli_redacts_invalid_homepage_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_yaml = Path(tmp) / "project.yaml"
+            project_yaml.write_text(
+                'discoverability:\n'
+                '  description: "A repo seo helper"\n'
+                '  primary_keyword: "repo seo"\n'
+                '  homepage_url:\n'
+                '    - "https://synthetic-user:synthetic-password@example.invalid/docs"\n',
+                encoding="utf-8",
+            )
+            for output_args in ((), ("--json",)):
+                with self.subTest(output_args=output_args):
+                    result = self.run_script(
+                        "--root", tmp, "--project-yaml", str(project_yaml), *output_args,
+                    )
+                    self.assertEqual(result.returncode, 1)
+                    self.assertNotIn("synthetic-user", result.stdout + result.stderr)
+                    self.assertNotIn("synthetic-password", result.stdout + result.stderr)
+                    self.assertIn("discoverability.homepage_url must be a string", result.stdout)
+                    if output_args:
+                        payload = json.loads(result.stdout)
+                        self.assertIsNone(payload["shipwise"]["discoverability"]["homepage_url"])
+                        self.assertEqual(payload["shipwise"]["checks"]["homepage_url"]["status"], "error")
+
+    def test_shipwise_cli_reports_mixed_type_duplicate_topics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_yaml = Path(tmp) / "project.yaml"
+            project_yaml.write_text(
+                """discoverability:
+  description: "A repo seo helper"
+  primary_keyword: "repo seo"
+  homepage_url: "https://example.com"
+  keywords:
+    - "repo seo"
+  topics:
+    - 1
+    - 1
+    - "seo"
+    - "seo"
+    - "github"
+  social_image_set: true
+""",
+                encoding="utf-8",
+            )
+            result = self.run_script("--root", tmp, "--project-yaml", str(project_yaml), "--json")
+            self.assertEqual(result.returncode, 1, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["shipwise"]["checks"]["topics_format"]["status"], "error")
+            self.assertEqual(payload["shipwise"]["checks"]["topics_unique"]["status"], "error")
+            self.assertEqual(
+                {item["check"] for item in payload["errors"] if item["check"].startswith("topics_")},
+                {"topics_format", "topics_unique"},
+            )
+
+    def test_shipwise_cli_preserves_string_and_missing_field_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ["README.md", "LICENSE", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SECURITY.md"]:
+                (root / name).write_text("ok\n", encoding="utf-8")
+            issue_dir = root / ".github" / "ISSUE_TEMPLATE"
+            issue_dir.mkdir(parents=True)
+            (issue_dir / "bug.md").write_text("# Bug\n", encoding="utf-8")
+            project_yaml = root / "project.yaml"
+            fields = {
+                "description": '"A repo seo helper"',
+                "primary_keyword": '"repo seo"',
+                "homepage_url": '"https://example.com"',
+            }
+            tail = """  keywords:
+    - "repo seo"
+  topics:
+    - "seo"
+    - "github"
+    - "developer-tools"
+    - "metadata"
+    - "open-source"
+  social_image_set: true
+"""
+            for value in ["null", "true", "123", "1.5", "[repo, seo]", "{foo: bar}", "[repo, {foo: bar}]", "{foo: [repo, seo]}", "123 # note", "!!int 123", "&value 123", "*numeric", "repo *numeric"]:
+                with self.subTest(string=value):
+                    project_yaml.write_text(
+                        "discoverability:\n"
+                        + f'  description: "A {value} helper"\n  primary_keyword: "{value}"\n'
+                        + f'  homepage_url: {fields["homepage_url"]}\n'
+                        + tail,
+                        encoding="utf-8",
+                    )
+                    result = self.run_script("--root", str(root), "--project-yaml", str(project_yaml), "--json")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    payload = json.loads(result.stdout)
+                    self.assertEqual(payload["errors"], [])
+                    self.assertEqual(payload["shipwise"]["discoverability"]["primary_keyword"], value)
+                    self.assertEqual(payload["shipwise"]["discoverability"]["description"], f"A {value} helper")
+            for description, keyword, expected in [
+                ('"A repo # seo helper" # note', '"repo # seo" # note', "A repo # seo helper"),
+                ("'A repo # seo helper' # note", "'repo # seo' # note", "A repo # seo helper"),
+                ('&text "A repo seo helper" # note', '&keyword "repo seo" # note', "A repo seo helper"),
+                ("!!str 123 # note", "!!str 123 # note", "123"),
+                ('!!str &text "A repo seo helper"', '&keyword !!str "repo seo"', "A repo seo helper"),
+                ("!<tag:yaml.org,2002:str> 123", "!<tag:yaml.org,2002:str> 123", "123"),
+                ("! 123", "! 123", "123"),
+                ('"A repo seo helper"', '"repo seo"', "A repo seo helper"),
+                ("'A repo''s seo helper'", '"repo\'s seo"', "A repo's seo helper"),
+                ('"A repo\'s seo helper"', "'repo''s seo'", "A repo's seo helper"),
+                ("&text !!str 'A repo''s seo helper' # note", "!!str &keyword 'repo''s seo' # note", "A repo's seo helper"),
+                ("'A repo''''s seo helper'", '"repo\'\'s seo"', "A repo''s seo helper"),
+                (r"'A repo\n seo helper'", r"'repo\n seo'", r"A repo\n seo helper"),
+                ("'A *numeric helper' # note", "'*numeric' # note", "A *numeric helper"),
+            ]:
+                with self.subTest(description=description, keyword=keyword):
+                    project_yaml.write_text(
+                        "discoverability:\n"
+                        + f"  description: {description}\n  primary_keyword: {keyword}\n"
+                        + '  homepage_url: &homepage "https://example.com" # note\n'
+                        + tail,
+                        encoding="utf-8",
+                    )
+                    result = self.run_script("--root", str(root), "--project-yaml", str(project_yaml), "--json")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    payload = json.loads(result.stdout)
+                    self.assertEqual(payload["errors"], [])
+                    self.assertEqual(payload["shipwise"]["discoverability"]["description"], expected)
+                    self.assertEqual(payload["shipwise"]["discoverability"]["primary_keyword"], expected.removeprefix("A ").removesuffix(" helper"))
+                    self.assertEqual(payload["shipwise"]["discoverability"]["homepage_url"], "https://example.com")
+            for field in fields:
+                for missing in [True, False]:
+                    with self.subTest(field=field, missing=missing):
+                        values = {**fields, field: '\"\"'}
+                        if missing:
+                            del values[field]
+                        project_yaml.write_text(
+                            "discoverability:\n"
+                            + "".join(f"  {key}: {value}\n" for key, value in values.items())
+                            + tail,
+                            encoding="utf-8",
+                        )
+                        result = self.run_script(
+                            "--root", str(root), "--project-yaml", str(project_yaml), "--json"
+                        )
+                        self.assertEqual(result.returncode, 1, result.stderr)
+                        check = json.loads(result.stdout)["shipwise"]["checks"][field]
+                        self.assertEqual(check["reason"], f"missing discoverability.{field}")
+
     def test_shipwise_gate_rejects_duplicate_topics_and_each_missing_community_file(self) -> None:
         module = load_script("repo_seo_baseline.py")
         required_files = [
