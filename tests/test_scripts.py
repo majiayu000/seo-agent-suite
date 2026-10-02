@@ -978,6 +978,9 @@ class RegistryPackageNameTests(unittest.TestCase):
         npm_names = [
             "demo", "@scope/demo", "demo.js", "demo_name", "-foo", "--registry",
             "JSONStream", "214" + "a" * 211,
+            "foo~bar", "foo'bar", "foo!bar", "foo(bar)", "foo*bar",
+            "!foo", "~foo", "*foo", "(foo)", "'foo",
+            "@scope/foo!bar", "@scope/~foo", "@scope/*", "@~scope/foo",
         ]
         cargo_names = ["demo-crate", "Demo_crate", "a" * 64]
         with tempfile.TemporaryDirectory() as tmp:
