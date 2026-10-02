@@ -560,6 +560,31 @@ discoverability:
                                 self.assertIn("discoverability.description must be a string", result.stdout)
                                 self.assertIn("discoverability.primary_keyword must be a string", result.stdout)
 
+    def test_shipwise_cli_redacts_invalid_homepage_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_yaml = Path(tmp) / "project.yaml"
+            project_yaml.write_text(
+                'discoverability:\n'
+                '  description: "A repo seo helper"\n'
+                '  primary_keyword: "repo seo"\n'
+                '  homepage_url:\n'
+                '    - "https://synthetic-user:synthetic-password@example.invalid/docs"\n',
+                encoding="utf-8",
+            )
+            for output_args in ((), ("--json",)):
+                with self.subTest(output_args=output_args):
+                    result = self.run_script(
+                        "--root", tmp, "--project-yaml", str(project_yaml), *output_args,
+                    )
+                    self.assertEqual(result.returncode, 1)
+                    self.assertNotIn("synthetic-user", result.stdout + result.stderr)
+                    self.assertNotIn("synthetic-password", result.stdout + result.stderr)
+                    self.assertIn("discoverability.homepage_url must be a string", result.stdout)
+                    if output_args:
+                        payload = json.loads(result.stdout)
+                        self.assertIsNone(payload["shipwise"]["discoverability"]["homepage_url"])
+                        self.assertEqual(payload["shipwise"]["checks"]["homepage_url"]["status"], "error")
+
     def test_shipwise_cli_reports_mixed_type_duplicate_topics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_yaml = Path(tmp) / "project.yaml"

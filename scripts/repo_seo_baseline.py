@@ -363,6 +363,8 @@ def evaluate_shipwise_project(root: Path, project_yaml: Path) -> dict:
         if not isinstance(value, str):
             type_errors[field] = check_item(False, None, f"discoverability.{field} must be a string")
             text_fields[field] = ""
+            if field == "homepage_url":
+                discoverability[field] = None
     homepage = text_fields["homepage_url"]
     primary_keyword = text_fields["primary_keyword"].strip()
     description = text_fields["description"].strip()
