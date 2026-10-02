@@ -32,6 +32,88 @@ def public_http_mod(module):
     return module.public_http
 
 
+class PublicHttpURLTests(unittest.TestCase):
+    def test_request_blocks_non_public_endpoints_before_connect(self) -> None:
+        module = load_script("public_http.py")
+        addresses = [
+            "64:ff9b::a9fe:a9fe",  # NAT64 link-local IPv4
+            "64:ff9b::7f00:1",  # NAT64 loopback IPv4
+            "64:ff9b::a00:1",  # NAT64 private IPv4
+            "64:ff9b::e000:1",  # NAT64 multicast IPv4
+            "64:ff9b::",  # NAT64 unspecified IPv4
+            "64:ff9b:1::1",  # Local-use NAT64 prefix
+            "fec0::1",
+            "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",  # Site-local upper bound
+            "224.0.0.1",
+            "239.255.255.250",
+            "ff02::1",
+            "::ffff:224.0.0.1",  # IPv4-mapped multicast
+            "10.0.0.1",
+            "127.0.0.1",
+            "169.254.169.254",
+            "::ffff:127.0.0.1",
+            "::",
+            "::1",
+            "fe80::1",
+            "100::1",  # Reserved IPv6
+        ]
+        public_endpoint = (module.socket.AF_INET, module.socket.SOCK_STREAM, 6, "", ("8.8.8.8", 80))
+        for address in addresses:
+            ipv6 = ":" in address
+            family = module.socket.AF_INET6 if ipv6 else module.socket.AF_INET
+            sockaddr = (address, 80, 0, 0) if ipv6 else (address, 80)
+            endpoint = (family, module.socket.SOCK_STREAM, 6, "", sockaddr)
+            literal_url = f"http://[{address}]/" if ipv6 else f"http://{address}/"
+            for url in (literal_url, "http://audit-target.example/"):
+                for endpoints in ([endpoint], [public_endpoint, endpoint]):
+                    with (
+                        self.subTest(address=address, url=url, mixed=len(endpoints) > 1),
+                        mock.patch.object(module.socket, "getaddrinfo", return_value=endpoints),
+                        mock.patch.object(module, "select_proxy", return_value=None),
+                        mock.patch.object(
+                            module, "connect_endpoint", side_effect=AssertionError("blocked connect")
+                        ) as connect_endpoint,
+                    ):
+                        with self.assertRaisesRegex(
+                            ValueError, "^URL resolves to a non-public address$"
+                        ):
+                            module.request_public_url_once(url, 1)
+                        connect_endpoint.assert_not_called()
+
+    def test_public_unicast_endpoints_remain_allowed(self) -> None:
+        module = load_script("public_http.py")
+        for address in ("8.8.8.8", "2606:4700:4700::1111", "::ffff:8.8.8.8", "64:ff9b::808:808"):
+            ipv6 = ":" in address
+            family = module.socket.AF_INET6 if ipv6 else module.socket.AF_INET
+            sockaddr = (address, 80, 0, 0) if ipv6 else (address, 80)
+            endpoints = [(family, module.socket.SOCK_STREAM, 6, "", sockaddr)]
+            with self.subTest(address=address), mock.patch.object(
+                module.socket, "getaddrinfo", return_value=endpoints
+            ):
+                parsed, validated = module.validate_public_http_url("http://public.example/")
+            self.assertEqual(parsed.hostname, "public.example")
+            self.assertEqual(validated, endpoints)
+
+    def test_audit_entrypoints_report_non_public_address_error(self) -> None:
+        for script, entrypoint in (("repo_seo_baseline.py", "http_check"), ("site_meta_audit.py", "fetch")):
+            module = load_script(script)
+            shared = public_http_mod(module)
+            for address in ("64:ff9b::a9fe:a9fe", "fec0::1", "ff02::1"):
+                endpoint = (shared.socket.AF_INET6, shared.socket.SOCK_STREAM, 6, "", (address, 80, 0, 0))
+                with (
+                    self.subTest(script=script, address=address),
+                    mock.patch.object(shared.socket, "getaddrinfo", return_value=[endpoint]),
+                    mock.patch.object(shared, "select_proxy", return_value=None),
+                    mock.patch.object(
+                        shared, "connect_endpoint", side_effect=AssertionError("blocked connect")
+                    ) as connect_endpoint,
+                ):
+                    result = getattr(module, entrypoint)("http://audit-target.example/")
+                    self.assertEqual(result["status"], "error")
+                    self.assertEqual(result["reason"], "URL resolves to a non-public address")
+                    connect_endpoint.assert_not_called()
+
+
 class RepoSeoBaselineTests(unittest.TestCase):
     def run_script(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -924,6 +1006,179 @@ discoverability:
 
         self.assertEqual(errors[0]["resource"], "robots")
         self.assertEqual(errors[0]["reason"], "redirect blocked")
+
+
+class RegistryPackageNameTests(unittest.TestCase):
+    def audit(self, root: Path, *args: str):
+        module = load_script("repo_seo_baseline.py")
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", ["repo_seo_baseline.py", "--root", str(root), *args]),
+            mock.patch.object(sys, "stdout", stdout),
+            mock.patch.object(module, "run_cmd", return_value={"status": "ok"}) as run_cmd,
+        ):
+            code = module.main()
+        return code, stdout.getvalue(), [call.args[0] for call in run_cmd.call_args_list]
+
+    def test_manifest_flags_are_errors_and_never_reach_registry_commands(self) -> None:
+        npm_flag = "--registry=http://127.0.0.1:9"
+        cargo_flag = "--index=sparse+http://127.0.0.1:9/"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text('{"name":"demo"}', encoding="utf-8")
+            nested = root / "nested"
+            nested.mkdir()
+            (nested / "package.json").write_text(json.dumps({"name": npm_flag}), encoding="utf-8")
+            (root / "Cargo.toml").write_text(f'[package]\nname = "{cargo_flag}"\n', encoding="utf-8")
+
+            code, output, commands = self.audit(root, "--json")
+
+        self.assertNotIn(npm_flag, [arg for command in commands for arg in command])
+        self.assertNotIn(cargo_flag, [arg for command in commands for arg in command])
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(set(payload["registry"]["npm"]), {"demo"})
+        self.assertEqual(payload["registry"]["crates"], {})
+        self.assertEqual(
+            {error["path"] for error in payload["manifests"]["errors"]},
+            {"nested/package.json", "Cargo.toml"},
+        )
+        self.assertTrue(all(error["surface"] == "manifest" for error in payload["errors"]))
+
+    def test_invalid_manifest_name_types_and_syntax_fail_without_registry_calls(self) -> None:
+        invalid_npm = [
+            1, 0, True, False, None, ["demo"], {"name": "demo"}, "", " demo", "demo ",
+            "demo\n", ".demo", "_demo", "demo@1", "https://example.com",
+            "@scope/", "scope/demo", "@scope/demo/extra", "@scope/.foo", "@scope/..foo",
+            "@scope/..", "démø", "a" * 215,
+        ]
+        invalid_cargo = [
+            1, 0, True, False, ["demo"], {"name": "demo"}, "", " demo", "demo ", "demo\n",
+            "-demo", "_demo", "1demo", "demo@1", "demo.crate", "démø", "a" * 65,
+        ]
+        for registry, names in (("npm", invalid_npm), ("cargo", invalid_cargo)):
+            for name in names:
+                with self.subTest(registry=registry, name=name), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    if registry == "npm":
+                        path = "package.json"
+                        (root / path).write_text(json.dumps({"name": name}), encoding="utf-8")
+                    else:
+                        path = "Cargo.toml"
+                        value = '{name = "demo"}' if isinstance(name, dict) else json.dumps(name)
+                        (root / path).write_text(f"[package]\nname = {value}\n", encoding="utf-8")
+                    code, output, commands = self.audit(root, "--json")
+
+                self.assertFalse(any(command[0] in {"npm", "cargo"} for command in commands))
+                self.assertEqual(code, 1)
+                payload = json.loads(output)
+                self.assertEqual(payload["status"], "error")
+                self.assertEqual(payload["manifests"]["errors"][0]["path"], path)
+                self.assertEqual(payload["errors"][0]["surface"], "manifest")
+                self.assertIn("package name", payload["errors"][0]["reason"])
+
+    def test_invalid_cli_names_use_the_structured_error_gate(self) -> None:
+        for flag, name in (
+            ("--npm", "--registry=http://127.0.0.1:9"),
+            ("--crate", "--index=sparse+http://127.0.0.1:9/"),
+            ("--npm", "demo@1"),
+            ("--npm", "@scope/.foo"),
+            ("--crate", "demo.crate"),
+            ("--npm", ""),
+            ("--crate", ""),
+        ):
+            for output_mode in ([], ["--json"]):
+                with self.subTest(flag=flag, name=name, mode=output_mode), tempfile.TemporaryDirectory() as tmp:
+                    code, output, commands = self.audit(Path(tmp), f"{flag}={name}", *output_mode)
+                self.assertFalse(any(command[0] in {"npm", "cargo"} for command in commands))
+                self.assertEqual(code, 1)
+                if output_mode:
+                    payload = json.loads(output)
+                    self.assertEqual(payload["status"], "error")
+                    self.assertEqual(payload["manifests"]["errors"][0]["path"], flag)
+                else:
+                    self.assertIn("status: error", output)
+                    self.assertIn("package name", output)
+
+    def test_valid_names_are_deduplicated_and_passed_as_operands(self) -> None:
+        npm_names = [
+            "demo", "@scope/demo", "demo.js", "demo_name", "-foo", "--registry",
+            "JSONStream", "214" + "a" * 211,
+            "foo~bar", "foo'bar", "foo!bar", "foo(bar)", "foo*bar",
+            "!foo", "~foo", "*foo", "(foo)", "'foo",
+            "@scope/foo!bar", "@scope/~foo", "@scope/*", "@~scope/foo",
+        ]
+        cargo_names = ["demo-crate", "Demo_crate", "a" * 64]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text('{"name":"JSONStream"}', encoding="utf-8")
+            (root / "Cargo.toml").write_text('[package]\nname = "demo-crate"\n', encoding="utf-8")
+            args = [f"--npm={name}" for name in npm_names]
+            args += [f"--crate={name}" for name in cargo_names]
+            code, output, commands = self.audit(root, *args, "--json")
+
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["manifests"]["errors"], [])
+        self.assertEqual(set(payload["registry"]["npm"]), set(npm_names))
+        self.assertEqual(set(payload["registry"]["crates"]), set(cargo_names))
+        self.assertEqual(
+            [command for command in commands if command[0] == "npm"],
+            [["npm", "view", "--json", "--", name] for name in npm_names],
+        )
+        self.assertEqual(
+            [command for command in commands if command[0] == "cargo"],
+            [["cargo", "search", "--limit", "3", "--", name] for name in cargo_names],
+        )
+
+    def test_unnamed_npm_projects_and_cargo_workspaces_remain_optional(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text('{}', encoding="utf-8")
+            (root / "Cargo.toml").write_text('[workspace]\nmembers = []\n', encoding="utf-8")
+            code, output, commands = self.audit(root, "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output)["manifests"]["errors"], [])
+        self.assertFalse(any(command[0] in {"npm", "cargo"} for command in commands))
+
+    def test_invalid_names_preserve_metadata_and_homepage_audits(self) -> None:
+        module = load_script("repo_seo_baseline.py")
+        stdout = io.StringIO()
+        npm_homepage = "https://npm-site.example"
+        cargo_homepage = "https://cargo-site.example"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text(json.dumps({
+                "name": "--registry=http://127.0.0.1:9", "homepage": npm_homepage,
+                "description": "npm metadata", "keywords": ["seo"],
+            }), encoding="utf-8")
+            (root / "Cargo.toml").write_text(
+                '[package]\nname = "--index=sparse+http://127.0.0.1:9/"\n'
+                f'homepage = "{cargo_homepage}"\ndescription = "cargo metadata"\n',
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(sys, "argv", ["repo_seo_baseline.py", "--root", tmp, "--json"]),
+                mock.patch.object(sys, "stdout", stdout),
+                mock.patch.object(module, "run_cmd", return_value={"status": "ok"}) as run_cmd,
+                mock.patch.object(module, "site_resource_checks", return_value={
+                    "homepage": {"status": "ok"}, "robots": {"status": "ok"}, "sitemap": {"status": "ok"},
+                }) as site_checks,
+            ):
+                code = module.main()
+
+        self.assertEqual(code, 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(len(payload["manifests"]["npm"]), 1)
+        self.assertEqual(payload["manifests"]["npm"][0]["description"], "npm metadata")
+        self.assertEqual(payload["manifests"]["npm"][0]["keywords"], ["seo"])
+        self.assertEqual(payload["manifests"]["cargo"]["description"], "cargo metadata")
+        self.assertEqual(set(payload["site"]), {npm_homepage, cargo_homepage})
+        self.assertEqual({call.args[0] for call in site_checks.call_args_list}, {npm_homepage, cargo_homepage})
+        self.assertFalse(any(call.args[0][0] in {"npm", "cargo"} for call in run_cmd.call_args_list))
+        self.assertEqual(len(payload["manifests"]["errors"]), 2)
 
 
 class SiteMetaAuditTests(unittest.TestCase):
