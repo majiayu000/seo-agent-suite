@@ -60,6 +60,8 @@ def run_cmd(args: list[str], cwd: Path | None = None, timeout: int = 20) -> dict
 def read_json(path: Path) -> tuple[dict | None, dict | None]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError as exc:
+        return None, {"status": "error", "path": str(path), "reason": f"invalid UTF-8: {exc}"}
     except OSError as exc:
         return None, {"status": "error", "path": str(path), "reason": str(exc)}
     except json.JSONDecodeError as exc:
@@ -74,6 +76,8 @@ def read_toml(path: Path) -> tuple[dict | None, dict | None]:
         return None, {"status": "error", "path": str(path), "reason": "tomllib unavailable on Python <3.11"}
     try:
         return tomllib.loads(path.read_text(encoding="utf-8")), None
+    except UnicodeDecodeError as exc:
+        return None, {"status": "error", "path": str(path), "reason": f"invalid UTF-8: {exc}"}
     except OSError as exc:
         return None, {"status": "error", "path": str(path), "reason": str(exc)}
     except tomllib.TOMLDecodeError as exc:

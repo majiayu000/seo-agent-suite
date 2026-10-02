@@ -306,6 +306,32 @@ class RepoSeoBaselineTests(unittest.TestCase):
         self.assertEqual(error["status"], "error")
         self.assertIn("denied", error["reason"])
 
+    def test_invalid_manifest_encoding_keeps_error_handoff(self) -> None:
+        module = load_script("repo_seo_baseline.py")
+        for filename in ["package.json", "Cargo.toml", "pyproject.toml"]:
+            for output_args in [("--json",), ()]:
+                with self.subTest(filename=filename, output_args=output_args), tempfile.TemporaryDirectory() as tmp:
+                    (Path(tmp) / filename).write_bytes(b"\xff")
+                    result = self.run_script("--root", tmp, *output_args)
+
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stderr, "")
+                    self.assertNotIn("Traceback", result.stdout)
+                    reason = (
+                        "invalid UTF-8" if filename == "package.json" or module.tomllib
+                        else "tomllib unavailable on Python <3.11"
+                    )
+                    if output_args:
+                        payload = json.loads(result.stdout)
+                        self.assertEqual(payload["status"], "error")
+                        self.assertEqual(len(payload["errors"]), 1)
+                        self.assertEqual(payload["errors"][0]["surface"], "manifest")
+                        self.assertEqual(payload["errors"][0]["path"], filename)
+                        self.assertIn(reason, payload["errors"][0]["reason"])
+                    else:
+                        self.assertIn("status: error", result.stdout)
+                        self.assertIn(reason, result.stdout)
+
     def test_non_table_toml_sections_emit_json_errors(self) -> None:
         module = load_script("repo_seo_baseline.py")
         for filename, section, manifest in [
