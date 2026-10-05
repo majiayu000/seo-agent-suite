@@ -43,6 +43,8 @@ python3 scripts/site_meta_audit.py <url> --json
 
 ## Output
 
+For maintainers validating these collection workflows, see `references/browser-acceptance.md` for the optional headless fixture and public-page acceptance command. Its bounded evidence does not substitute for auditing the user's own site.
+
 Use `references/report-template.md`. Default to an audit report and local issue drafts; create remote issues or change/deploy the site only within the user's authorized task. Each action needs its exact target URL/file, before evidence, proposed change, retest command/tool and expected result, owner and completion condition. Keep unavailable evidence and account blockers explicit.
 
 Track three separate clocks: the change is live and verified at the URL; a later crawl/index observation reflects that version; comparable traffic/ranking measurements show an effect. A passing deployment retest completes the technical fix without claiming indexing or SEO gains.

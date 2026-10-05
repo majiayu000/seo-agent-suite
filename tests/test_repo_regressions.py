@@ -124,6 +124,39 @@ class RepoRegressions(unittest.TestCase):
             with mock.patch.object(repo.public_http, 'fetch_public_url', return_value={'status': 'ok', 'body': '{"crate": {"id": "demo-other", "max_version": "1.0.0"}}'}):
                 self.assertEqual(repo.crate_registry_check('demo')['status'], 'error')
 
+    def test_workspace_without_members_resolves_root_inheritance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'Cargo.toml').write_text(
+                '[package]\nname = "root-demo"\nversion.workspace = true\n'
+                'homepage.workspace = true\n[workspace]\n'
+                '[workspace.package]\nversion = "2.1.0"\nhomepage = "https://site.example"\n')
+            data = {'workspace_members': ['root-id'], 'packages': [{
+                'id': 'root-id', 'name': 'root-demo', 'version': '2.1.0',
+                'homepage': 'https://site.example', 'manifest_path': str(root / 'Cargo.toml')} ]}
+            with mock.patch.object(repo, 'run_cmd', return_value={'status': 'ok', 'stdout': json.dumps(data)}):
+                manifests = repo.collect_manifests(root)
+            self.assertEqual(manifests['cargo']['version'], '2.1.0')
+            self.assertEqual(manifests['cargo']['homepage'], 'https://site.example')
+            self.assertEqual(manifests['errors'], [])
+
+    def test_empty_workspace_members_still_collects_implicit_members(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'Cargo.toml').write_text(
+                '[package]\nname = "root-demo"\nversion = "1.0.0"\n'
+                '[workspace]\nmembers = []\n')
+            data = {'workspace_members': ['root-id', 'implicit-id'], 'packages': [
+                {'id': 'root-id', 'name': 'root-demo', 'version': '1.0.0',
+                 'manifest_path': str(root / 'Cargo.toml')},
+                {'id': 'implicit-id', 'name': 'implicit-demo', 'version': '1.2.0',
+                 'manifest_path': str(root / 'implicit/Cargo.toml')},
+                {'id': 'excluded-id', 'name': 'excluded-demo', 'version': '1.0.0',
+                 'manifest_path': '/excluded/Cargo.toml'}]}
+            with mock.patch.object(repo, 'run_cmd', return_value={'status': 'ok', 'stdout': json.dumps(data)}):
+                manifests = repo.collect_manifests(root)
+            self.assertEqual([item['name'] for item in manifests['cargo_members']], ['implicit-demo'])
+
     def test_crate_api_only_asserts_missing_on_404(self):
         cases = [
             ({'status': 'error', 'http_status': 404}, 'missing'),

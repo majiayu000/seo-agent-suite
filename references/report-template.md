@@ -44,6 +44,22 @@ Confidence values:
 Reuse Shipwise's existing keyword map when available; do not duplicate its tier
 definitions. This table also works for a standalone brief.
 
+## Offsite Brand Evidence (When Applicable)
+
+- Identity anchors and excluded name collisions:
+- Search queries/tool, language/market, collected at, result depth and limits:
+- Candidate/fetched/matched/excluded/unverified counts and denominator;
+  deduplication of mirrors, shared origins and language variants:
+
+| Source URL | Ownership / relationship | Identity evidence | Mention context / original or copied | Link destination / rel / current status | Collected at / fresh or cached | Confidence / action / retest |
+|---|---|---|---|---|---|---|
+|  | owned / third-party / unknown |  |  |  |  |  |
+
+Count a directory listing or mirror as that observation, not an independent
+endorsement. Mark fields that could not be inspected unknown. State backlink
+index, search coverage and AI visibility as unmeasured unless their own
+measurement sources were used.
+
 ## Boundaries
 
 State measured, inferred, unknown, or not in scope for indexing, rankings,

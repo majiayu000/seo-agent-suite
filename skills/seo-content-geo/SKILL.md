@@ -1,6 +1,6 @@
 ---
 name: seo-content-geo
-description: Plan and review SEO content, keyword maps, content briefs, GEO/AEO readiness, AI-search citation potential, FAQ/schema opportunities, and comparison/disambiguation pages. Use when Codex needs content strategy, long-tail page ideas, AI answer optimization, E-E-A-T/entity clarity, or launch/discoverability copy that should align with Shipwise positioning.
+description: Plan and review SEO content, keyword maps, content briefs, GEO/AEO readiness, offsite brand evidence, AI-search citation potential, FAQ/schema opportunities, and comparison/disambiguation pages. Use when Codex needs content strategy, long-tail page ideas, AI answer optimization, E-E-A-T/entity clarity, offsite brand/mention review, or launch/discoverability copy that should align with Shipwise positioning.
 ---
 
 # SEO Content GEO
@@ -71,6 +71,36 @@ Create content and GEO/AEO recommendations with clear evidence boundaries. This 
   mentions from linked citations. Report observed counts and exclusions; a
   small manual sample measures that sample, not general AI share-of-voice.
 
+## Offsite Brand Evidence (When Requested)
+
+1. Establish identity from maintained product surfaces: exact name, owner,
+   repository/package URL, category, and known name collisions. Search the
+   exact name with the owner or repository identifier as well as the name
+   alone; exclude unrelated entities rather than counting matching words.
+2. Record queries, search tool/engine, collection time, language/market when
+   known, result depth, candidate URLs, and fetch failures. Fetch relevant
+   candidate pages to verify the identity and context; search snippets alone
+   are discovery evidence. Preserve the distinction between current fetches
+   and cached extracts with an unknown refresh time.
+3. Classify each source as owner-controlled, third-party, or ownership
+   unknown. A maintainer's GitHub profile or hosted docs remain owned material.
+   Distinguish original third-party discussion/reviews from directories,
+   mirrors, syndicated copy, paid placements and disclosed relationships.
+   A copied listing establishes a listing, not independent endorsement.
+4. Record mention context, linked citation versus unlinked mention, the
+   observed destination, fetch status, and `rel` values when inspected. Check
+   priority destinations and redirects. An inaccessible page or cached link
+   is unverified; a working link does not prove indexing or link equity.
+   Reuse `seo-data-sources` for backlink-index coverage or measured AI claims.
+5. Deduplicate shared origin/copy and language variants when counting sources.
+   Report candidate, fetched, identity-matched, excluded and unverified counts
+   with their denominator. These counts describe this sample; do not turn
+   them into an invented authority score or infer global absence from a
+   non-mention. Recommend only specific supported corrections or hypotheses,
+   with a retest criterion; outreach/posting requires existing authorization.
+
+Use the optional brand evidence table in `references/report-template.md`.
+
 ## Output
 
 Deliver one of:
@@ -80,6 +110,8 @@ Deliver one of:
   (`Confirmed`, `Likely`, `Hypothesis`).
 - A GitHub issue set where each issue names the page, the change, and the
   evidence behind it.
+- An offsite brand evidence report with source ownership, identity matches,
+  mention/link observations, sampling limits and concrete retest actions.
 
 ## Failure Handling
 
