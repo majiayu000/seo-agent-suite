@@ -66,10 +66,8 @@ Skills live under [skills/](skills/), and reference material lives under
 ## Load the skills in Codex
 
 Cloning the repository makes the Python commands available; install the plugin
-to make its four skills available in Codex. For local testing in a supported
-ChatGPT desktop/Codex client, add the following entry to this checkout's
-`.agents/plugins/marketplace.json`. Merge it into an existing catalog rather
-than replacing other entries:
+to make its four skills available in Codex. This checkout includes
+`.agents/plugins/marketplace.json` for local installation. Its catalog is:
 
 ```json
 {
@@ -86,10 +84,19 @@ than replacing other entries:
 ```
 
 The source path is relative to the marketplace root (this checkout), not to
-`.agents/plugins/`. Restart the desktop app, open the Plugins Directory, select
-`seo-suite-local`, and install SEO Agent Suite. Start a new chat and confirm the
-four skills listed below are available. Then request, for example:
-“Use technical-seo-audit to audit https://example.com/ and produce a report.”
+`.agents/plugins/`. With Codex CLI versions supporting `plugin add` (verified
+with 0.160.0), run these commands from the checkout:
+
+```bash
+codex plugin marketplace add .
+codex plugin add seo-agent-suite@seo-suite-local
+```
+
+In the desktop app, restart it, open the Plugins Directory, select
+`seo-suite-local`, and install SEO Agent Suite. Start a new chat or CLI session
+and confirm the four skills listed below are available under the
+`seo-agent-suite:` namespace. Then request, for example:
+“Use seo-agent-suite:technical-seo-audit to audit https://example.com/ and produce a report.”
 Confirm that the skill resolves its scripts and references from the installed
 plugin root. After edits, refresh the installed copy and restart before retesting.
 Provider authentication is separate and is only needed for the data you request.

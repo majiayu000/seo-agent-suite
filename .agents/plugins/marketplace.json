@@ -1,0 +1,17 @@
+{
+  "name": "seo-suite-local",
+  "plugins": [
+    {
+      "name": "seo-agent-suite",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
