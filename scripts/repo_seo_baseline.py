@@ -389,14 +389,14 @@ def parse_shipwise_discoverability(path: Path) -> dict:
     data: dict[str, object] = {}
 
     for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
         if not in_block:
-            if line.strip() == "discoverability:" and not line.startswith(" "):
+            if re.fullmatch(r"discoverability:(?:[ \t]+#.*|[ \t]*)", line):
                 in_block = True
             continue
         if line and not line.startswith(" "):
             break
-        if not line.strip():
-            continue
         if line.startswith("    - "):
             if not current_list:
                 raise ValueError(f"{path}: list item without list key in discoverability block")
@@ -405,10 +405,14 @@ def parse_shipwise_discoverability(path: Path) -> dict:
                 raise ValueError(f"{path}: {current_list} is not a list")
             data[current_list].append(parse_scalar(line.removeprefix("    - ")))
             continue
-        if not line.startswith("  ") or ":" not in line:
+        # Only direct two-space members belong to this restricted block.
+        # Reject nested mappings rather than promoting their keys.
+        indentation = len(line) - len(line.lstrip(" "))
+        if indentation != 2 or line[2:].startswith("\t") or ":" not in line:
             raise ValueError(f"{path}: unsupported discoverability line")
         key, raw_value = line.strip().split(":", 1)
-        value = [] if raw_value.strip() == "" else parse_scalar(raw_value)
+        empty_header = not raw_value.strip() or raw_value.lstrip().startswith("#")
+        value = [] if empty_header else parse_scalar(raw_value)
         data[key] = value
         current_list = key if value == [] else None
 
