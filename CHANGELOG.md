@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Include implicit Cargo workspace members and resolve inherited root-package
+  metadata even when no explicit member list is provided.
+- Add a CLI-installable local marketplace, exercised plugin/browser acceptance,
+  and an offsite brand evidence workflow with source identity and ownership.
+
 - Retain robots, canonical, redirect and structured-data evidence; discover
   sitemaps declared in robots.txt and distinguish resource presence from validity.
 - Handle international URLs and declared HTML encodings without interrupting

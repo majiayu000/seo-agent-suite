@@ -175,7 +175,10 @@ async function main() {
       const equivalence = Object.fromEntries(fields.map(f => [f, JSON.stringify(d[f]) === JSON.stringify(m[f])]));
       const rawEquivalence = Object.fromEntries(['title', 'links', 'canonicals', 'robots', 'json_ld'].map(f => [f, JSON.stringify(d[f]) === JSON.stringify(d.raw_snapshot[f])]));
       if (name === 'python-turtle') assert(d.images.some(i => i.natural_width > 0));
-      report.public.push({ url: d.url, status: d.http_status, title: d.title, main_text_length: d.main_text.length, mobile_equivalence: equivalence, raw_rendered_equivalence: rawEquivalence, raw_main_text_length: d.raw_snapshot.main_text.length, hreflang: d.hreflang, canonicals: d.canonicals, images: d.images, failed_resources: d.failed_resources, desktop_artifacts: [d.raw_file, d.rendered_file], mobile_artifacts: [m.raw_file, m.rendered_file] });
+      report.public.push({ url: d.url, status: d.http_status, title: d.title, main_text_length: d.main_text.length, mobile_equivalence: equivalence, raw_rendered_equivalence: rawEquivalence, raw_main_text_length: d.raw_snapshot.main_text.length, hreflang: d.hreflang, canonicals: d.canonicals, images: d.images, failed_resources: d.failed_resources,
+        desktop_capture: { user_agent: d.user_agent, viewport: d.viewport, wait_condition: d.wait_condition },
+        mobile_capture: { status: m.http_status, user_agent: m.user_agent, viewport: m.viewport, wait_condition: m.wait_condition, failed_resources: m.failed_resources },
+        desktop_artifacts: [d.raw_file, d.rendered_file], mobile_artifacts: [m.raw_file, m.rendered_file] });
     }
     report.fixture_captures = Object.fromEntries(Object.entries(captures).map(([route, value]) => {
       const { raw, ...evidence } = value;

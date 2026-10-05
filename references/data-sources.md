@@ -33,6 +33,14 @@ Search Console boundaries:
 
 [PageSpeed Insights](https://developers.google.com/speed/docs/insights/v5/about) separates Lighthouse lab diagnostics from CrUX field data. Record mobile/desktop, URL versus origin, the collection period, and field percentile for LCP/INP/CLS. Preserve insufficient-data or origin-fallback status; a lab score/TBT is not field INP or proof of a CWV pass. Use comparable lab settings/runs and field windows for retests.
 
+Check which fields the current endpoint actually returns. Google’s
+[API guide](https://developers.google.com/speed/docs/insights/v5/get-started)
+announces planned removal of PageSpeed's embedded field data and recommends
+the CrUX APIs. Missing field data is not a passing result. For authentication,
+permission or quota failures, retain the HTTP status and redacted provider
+reason, mark the affected measurement blocked, and resume with authorized
+access or quota. Do not treat an error response as an empty measurement.
+
 ## Crawling And Rendering
 
 Use when HTML fetches are insufficient:

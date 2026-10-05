@@ -228,8 +228,8 @@ def collect_manifests(root: Path) -> dict:
                 manifests["errors"].append(name_error)
                 manifests["cargo"].update({"status": "error", "reason": name_error["reason"]})
 
-    workspace = cargo_data.get("workspace", {}) if cargo_data else {}
-    if isinstance(workspace, dict) and workspace.get("members"):
+    workspace = cargo_data.get("workspace") if cargo_data else None
+    if isinstance(workspace, dict) and (workspace.get("members") or cargo_data.get("package")):
         metadata = run_cmd(["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked", "--offline"], cwd=root)
         manifests["cargo_members"] = []
         try:

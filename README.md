@@ -182,6 +182,9 @@ The scripts are local dry-audit tools. They do not require API keys and should n
 
 ## Validation
 
+See the [acceptance status](references/acceptance-status.md) for completed
+plugin, browser and public-site checks, and the remaining account-data blockers.
+
 ```bash
 python3 -m py_compile scripts/*.py
 python3 tests/test_structure.py
