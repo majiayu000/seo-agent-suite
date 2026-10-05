@@ -150,7 +150,7 @@ class RepoSeoBaselineTests(unittest.TestCase):
                 if output_args:
                     payload = json.loads(result.stdout)
                     self.assertEqual(payload["status"], "error")
-                    self.assertEqual(list(payload["site"]), [f"https://{authority}/docs"])
+                    self.assertEqual(list(payload["site"]), [f"https://{authority}/docs?view=full"])
 
     def test_manifest_homepage_credentials_are_redacted_before_output(self) -> None:
         module = load_script("repo_seo_baseline.py")
@@ -1723,8 +1723,13 @@ class OriginResourceTests(unittest.TestCase):
             with self.subTest(script=name), self.http_site(routes) as (origin, paths, port):
                 code, payload = self.run_audit(name, origin + "/docs/", port)
                 if name == "repo_seo_baseline.py":
-                    self.assertEqual(code, 1)
-                    self.assertEqual({item["resource"] for item in payload["errors"]}, {"robots"})
+                    self.assertEqual(code, 0)
+                    self.assertEqual(payload["errors"], [])
+                    robots = payload["site"][origin + "/docs"]["robots"]
+                    self.assertFalse(robots["present"])
+                    self.assertEqual(robots["http_status"], 404)
+                    self.assertEqual(robots["observation"], "not_configured")
+                    self.assertEqual(robots["url"], origin + "/robots.txt")
                     self.assertEqual(payload["site"][origin + "/docs"]["sitemap"]["url"], origin + "/docs/sitemap.xml")
                 else:
                     self.assertEqual(code, 0)  # Metadata CLI keeps its existing page-status exit contract.
@@ -1827,12 +1832,19 @@ class RegistryPackageNameTests(unittest.TestCase):
     def audit(self, root: Path, *args: str):
         module = load_script("repo_seo_baseline.py")
         stdout = io.StringIO()
+        def registry_response(url):
+            name = url.rsplit("/", 1)[-1]
+            return {"status": "ok", "url": url, "body": json.dumps({
+                "crate": {"id": name, "max_version": "1.0.0"},
+            })}
         with (
             mock.patch.object(sys, "argv", ["repo_seo_baseline.py", "--root", str(root), *args]),
             mock.patch.object(sys, "stdout", stdout),
             mock.patch.object(module, "run_cmd", return_value={"status": "ok"}) as run_cmd,
+            mock.patch.object(module.public_http, "fetch_public_url", side_effect=registry_response) as fetch,
         ):
             code = module.main()
+        self.registry_urls = [call.args[0] for call in fetch.call_args_list]
         return code, stdout.getvalue(), [call.args[0] for call in run_cmd.call_args_list]
 
     def test_manifest_flags_are_errors_and_never_reach_registry_commands(self) -> None:
@@ -1941,12 +1953,16 @@ class RegistryPackageNameTests(unittest.TestCase):
         self.assertEqual(set(payload["registry"]["crates"]), set(cargo_names))
         self.assertEqual(
             [command for command in commands if command[0] == "npm"],
-            [["npm", "view", "--json", "--", name] for name in npm_names],
+            [["npm", "view", "--json", "--registry", "https://registry.npmjs.org", "--", name] for name in npm_names],
         )
         self.assertEqual(
-            [command for command in commands if command[0] == "cargo"],
-            [["cargo", "search", "--limit", "3", "--", name] for name in cargo_names],
+            self.registry_urls,
+            ["https://crates.io/api/v1/crates/" + name for name in cargo_names],
         )
+        self.assertFalse(any(command[0] == "cargo" for command in commands))
+        for name in cargo_names:
+            self.assertEqual(payload["registry"]["crates"][name]["name"], name)
+            self.assertEqual(payload["registry"]["crates"][name]["published_version"], "1.0.0")
 
     def test_unnamed_npm_projects_and_cargo_workspaces_remain_optional(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

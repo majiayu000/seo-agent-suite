@@ -38,7 +38,7 @@ Run the local validation checks:
 ```bash
 python3 -m py_compile scripts/*.py
 python3 tests/test_structure.py
-python3 tests/test_scripts.py
+python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
 Run a repository baseline audit:
@@ -62,6 +62,39 @@ python3 scripts/site_meta_audit.py https://example.com/ --json
 The plugin manifest lives at [.codex-plugin/plugin.json](.codex-plugin/plugin.json).
 Skills live under [skills/](skills/), and reference material lives under
 [references/](references/).
+
+## Load the skills in Codex
+
+Cloning the repository makes the Python commands available; install the plugin
+to make its four skills available in Codex. For local testing in a supported
+ChatGPT desktop/Codex client, add the following entry to this checkout's
+`.agents/plugins/marketplace.json`. Merge it into an existing catalog rather
+than replacing other entries:
+
+```json
+{
+  "name": "seo-suite-local",
+  "plugins": [
+    {
+      "name": "seo-agent-suite",
+      "source": {"source": "local", "path": "./"},
+      "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+      "category": "Productivity"
+    }
+  ]
+}
+```
+
+The source path is relative to the marketplace root (this checkout), not to
+`.agents/plugins/`. Restart the desktop app, open the Plugins Directory, select
+`seo-suite-local`, and install SEO Agent Suite. Start a new chat and confirm the
+four skills listed below are available. Then request, for example:
+“Use technical-seo-audit to audit https://example.com/ and produce a report.”
+Confirm that the skill resolves its scripts and references from the installed
+plugin root. After edits, refresh the installed copy and restart before retesting.
+Provider authentication is separate and is only needed for the data you request.
+See the [official OpenAI local-plugin instructions](https://developers.openai.com/plugins/build/plugins)
+for client support and marketplace management.
 
 ## Choose an audit and interpret its report
 
@@ -91,6 +124,25 @@ For the page audit, exit code **0** means the target page was fetched successful
 Missing metadata and crawl resources can still appear as **false** in `checks`.
 A non-zero exit reports a page-fetch failure or invalid input. Inspect the JSON
 rather than treating either script's exit code as a search-performance score.
+
+Both reports include `collected_at`; repository evidence also includes the Git
+HEAD. For pages, inspect `robots_meta_declarations`, `canonicals`, `json_ld`,
+and the response's `x_robots_tag`, `link_headers` and `redirects`. Presence
+checks remain presence checks: a JSON-LD tag is not proof of valid markup, and
+a canonical tag is not proof Google selected it.
+
+Sitemaps declared in robots.txt are checked before guessed paths, with at most
+10 sitemap candidates per audit. Inspect `sitemap_discovery` for omitted
+candidates or truncated robots evidence; incomplete coverage cannot prove a
+sitemap is absent. A robots 404/410 is reported as `not_configured` and does
+not by itself fail the repository audit. Community paths and issue-template
+candidates are local evidence; template usability still requires review.
+Automatic registry queries skip private npm packages and Cargo packages that
+cannot publish to crates.io. Workspace metadata is collected with
+`--locked --offline`; unavailable dependencies or metadata are reported rather
+than modifying the audited project's lockfile. Crate identity and published
+version come from the crates.io API, with local version differences kept
+separate from fetch success.
 
 Local scripts require no SEO-provider API keys, but repository checks can call
 installed tools and public URLs. They do not connect Search Console or keyword
@@ -126,7 +178,7 @@ The scripts are local dry-audit tools. They do not require API keys and should n
 ```bash
 python3 -m py_compile scripts/*.py
 python3 tests/test_structure.py
-python3 tests/test_scripts.py
+python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
 ## Release Notes

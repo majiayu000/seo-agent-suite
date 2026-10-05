@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Retain robots, canonical, redirect and structured-data evidence; discover
+  sitemaps declared in robots.txt and distinguish resource presence from validity.
+- Handle international URLs and declared HTML encodings without interrupting
+  structured audit errors, and redact credentials from report and error paths.
+- Cover GitHub community-file locations, repository homepages and actual public
+  workspace packages, with exact registry identity and version evidence.
+- Record collection time and revision, and add actionable content briefs,
+  provider measurement boundaries, local plugin setup and repair retests.
+- Run the new behavior regressions alongside the existing suite in CI.
+
 - Fixed local audit scripts to return non-zero status for invalid inputs,
   unreachable audited pages, manifest parser failures, and Shipwise
   discoverability gate failures.

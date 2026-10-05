@@ -4,14 +4,16 @@
 from __future__ import annotations
 
 import base64
-import codecs
 import http.client
 import ipaddress
+import re
 import socket
 import ssl
 import urllib.parse
 import urllib.request
 from email.message import Message
+from datetime import datetime, timezone
+from html.parser import HTMLParser
 
 SocketAddress = tuple[str, int] | tuple[str, int, int, int]
 ResolvedEndpoint = tuple[int, int, int, str, SocketAddress]
@@ -112,10 +114,46 @@ def charset_from_content_type(content_type: str | None) -> str | None:
     if not charset:
         return None
     try:
-        codecs.lookup(charset)
-    except LookupError:
+        # lookup() also accepts binary transforms such as base64_codec, which
+        # bytes.decode() explicitly rejects as a text encoding.
+        b"test".decode(charset, errors="replace")
+    except (LookupError, ValueError, TypeError, UnicodeError):
         return None
     return charset
+
+
+class _HTMLCharsetParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.charset: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "meta" or self.charset is not None:
+            return
+        attributes = dict(attrs)
+        if attributes.get("charset"):
+            self.charset = charset_from_content_type(f"text/html; charset={attributes['charset']}")
+        elif (attributes.get("http-equiv") or "").lower() == "content-type":
+            self.charset = charset_from_content_type(attributes.get("content"))
+
+
+def charset_from_html(body: bytes) -> str | None:
+    # Latin-1 preserves the ASCII markup while avoiding guesses about body text.
+    parser = _HTMLCharsetParser()
+    parser.feed(body.decode("latin-1"))
+    return parser.charset
+
+
+def _response_header_values(response: http.client.HTTPResponse, name: str) -> list[str]:
+    if response.getheader(name) is None:
+        return []
+    values = [value for key, value in response.getheaders() if key.lower() == name]
+    if name == "link":
+        values = [
+            re.sub(r"<([^>]*)>", lambda match: f"<{redact_url(match.group(1))}>", value)
+            for value in values
+        ]
+    return values
 
 
 def redact_proxy_url(raw: str) -> str:
@@ -391,6 +429,8 @@ def request_via_proxy(
                     "content_type": response.getheader("content-type"),
                     "sample_bytes": len(body),
                     "location": response.getheader("location"),
+                    "x_robots_tag": _response_header_values(response, "x-robots-tag"),
+                    "link_headers": _response_header_values(response, "link"),
                     "body": body,
                 }
             finally:
@@ -405,6 +445,7 @@ def request_public_url_once(url: str, timeout: int, *, max_body_bytes: int = 204
     parsed, endpoints = validate_public_http_url(url)
     port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
     path = urllib.parse.urlunparse(("", "", parsed.path or "/", parsed.params, parsed.query, ""))
+    path = urllib.parse.quote(path, safe="/%:;?@&=+$,!~*'()[]")
     proxy = select_proxy(parsed)
     if proxy is not None:
         return request_via_proxy(
@@ -425,6 +466,8 @@ def request_public_url_once(url: str, timeout: int, *, max_body_bytes: int = 204
                 "content_type": response.getheader("content-type"),
                 "sample_bytes": len(body),
                 "location": response.getheader("location"),
+                "x_robots_tag": _response_header_values(response, "x-robots-tag"),
+                "link_headers": _response_header_values(response, "link"),
                 "body": body,
             }
         except (OSError, http.client.HTTPException) as exc:
@@ -444,39 +487,55 @@ def follow_public_http(
 ) -> dict:
     """Fetch a URL with pinned connect and re-validation on every redirect hop."""
     current_url = url
+    evidence = {
+        "collected_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "redirects": [],
+        "x_robots_tag": [],
+        "link_headers": [],
+    }
     for redirect_count in range(max_redirects + 1):
         safe_url = redact_url(current_url)
         try:
             response = request_public_url_once(current_url, timeout, max_body_bytes=max_body_bytes)
         except ValueError as exc:
             prefix = "redirect blocked: " if current_url != url else ""
-            return {"status": "error", "url": safe_url, "reason": f"{prefix}{exc}"}
+            return {**evidence, "status": "error", "url": safe_url, "reason": f"{prefix}{exc}"}
         except (OSError, http.client.HTTPException) as exc:
-            return {"status": "error", "url": safe_url, "reason": str(exc) or type(exc).__name__}
+            return {**evidence, "status": "error", "url": safe_url, "reason": str(exc) or type(exc).__name__}
 
         status = response["http_status"]
+        evidence["x_robots_tag"] = response.get("x_robots_tag", [])
+        evidence["link_headers"] = response.get("link_headers", [])
         if status in REDIRECT_STATUSES:
             location = response["location"]
+            evidence["redirects"].append(
+                {"url": safe_url, "status": status, "location": redact_url(location) if location else location}
+            )
             if not location:
-                return {"status": "error", "url": safe_url, "reason": "redirect missing Location header"}
+                return {**evidence, "status": "error", "url": safe_url, "reason": "redirect missing Location header"}
             if redirect_count == max_redirects:
-                return {"status": "error", "url": safe_url, "reason": "too many redirects"}
-            current_url = urllib.parse.urljoin(current_url, location)
+                return {**evidence, "status": "error", "url": safe_url, "reason": "too many redirects"}
+            try:
+                current_url = urllib.parse.urljoin(current_url, location)
+            except ValueError as exc:
+                return {**evidence, "status": "error", "url": safe_url, "reason": f"redirect blocked: {exc}"}
             continue
         if not 200 <= status < 300:
             return {
+                **evidence,
                 "status": "error",
                 "url": safe_url,
                 "http_status": status,
                 "reason": f"HTTP status {status}",
             }
         return {
+            **evidence,
             "status": "ok",
             "url": safe_url,
             "http_status": status,
             "content_type": response["content_type"],
             "sample_bytes": response["sample_bytes"],
-            "location": response["location"],
+            "location": redact_url(response["location"]) if response["location"] else response["location"],
             "body": response["body"],
         }
 
@@ -485,16 +544,7 @@ def follow_public_http(
 
 def http_check(url: str, timeout: int = 15) -> dict:
     result = follow_public_http(url, timeout=timeout, max_body_bytes=2048)
-    if result.get("status") != "ok":
-        return {key: value for key, value in result.items() if key != "body"}
-    return {
-        "status": "ok",
-        "url": result["url"],
-        "http_status": result["http_status"],
-        "content_type": result["content_type"],
-        "sample_bytes": result["sample_bytes"],
-        "location": result["location"],
-    }
+    return {key: value for key, value in result.items() if key != "body"}
 
 
 def fetch_public_url(url: str, timeout: int = 20, *, max_body_bytes: int = 1_000_000) -> dict:
@@ -507,12 +557,23 @@ def fetch_public_url(url: str, timeout: int = 20, *, max_body_bytes: int = 1_000
     body = result.get("body") or b""
     body_truncated = len(body) > max_body_bytes
     body = body[:max_body_bytes]
-    charset = charset_from_content_type(content_type) or "utf-8"
+    charset = charset_from_content_type(content_type)
+    if charset is None and (not content_type or content_type.split(";", 1)[0].strip().lower() in {"text/html", "application/xhtml+xml"}):
+        charset = charset_from_html(body)
+    charset = charset or "utf-8"
+    try:
+        decoded_body = body.decode(charset, errors="replace")
+    except (LookupError, ValueError, TypeError, UnicodeError):
+        decoded_body = body.decode("utf-8", errors="replace")
     return {
         "status": "ok",
         "url": result["url"],
         "http_status": result["http_status"],
         "content_type": content_type,
-        "body": body.decode(charset, errors="replace"),
+        "body": decoded_body,
         "body_truncated": body_truncated,
+        "collected_at": result["collected_at"],
+        "redirects": result["redirects"],
+        "x_robots_tag": result["x_robots_tag"],
+        "link_headers": result["link_headers"],
     }

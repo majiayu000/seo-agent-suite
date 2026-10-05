@@ -21,4 +21,5 @@ Validation:
 ```bash
 python3 -m py_compile scripts/*.py
 python3 tests/test_structure.py
+python3 -m unittest discover -s tests -p 'test_*.py'
 ```
