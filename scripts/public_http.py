@@ -144,6 +144,21 @@ def charset_from_html(body: bytes) -> str | None:
     return parser.charset
 
 
+def _read_success_body(response: http.client.HTTPResponse, max_body_bytes: int) -> bytes:
+    # Redirect/error evidence comes from headers; their bodies are not consumed.
+    if not 200 <= response.status < 300:
+        return b""
+    expected_length = getattr(response, "length", None)
+    body = response.read(max_body_bytes)
+    # HTTPResponse.read(amount) does not itself reject an early EOF on a
+    # Content-Length response. Only require the bytes needed for this sample.
+    if isinstance(expected_length, int) and expected_length >= 0:
+        required = min(expected_length, max_body_bytes)
+        if len(body) < required:
+            raise http.client.IncompleteRead(body, required - len(body))
+    return body
+
+
 def _response_header_values(response: http.client.HTTPResponse, name: str) -> list[str]:
     if response.getheader(name) is None:
         return []
@@ -423,7 +438,7 @@ def request_via_proxy(
             try:
                 connection.request("GET", path, headers=headers)
                 response = connection.getresponse()
-                body = response.read(max_body_bytes)
+                body = _read_success_body(response, max_body_bytes)
                 return {
                     "http_status": response.status,
                     "content_type": response.getheader("content-type"),
@@ -460,7 +475,7 @@ def request_public_url_once(url: str, timeout: int, *, max_body_bytes: int = 204
         try:
             connection.request("GET", path, headers={"User-Agent": USER_AGENT})
             response = connection.getresponse()
-            body = response.read(max_body_bytes)
+            body = _read_success_body(response, max_body_bytes)
             return {
                 "http_status": response.status,
                 "content_type": response.getheader("content-type"),
