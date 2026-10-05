@@ -109,7 +109,10 @@ def normalize_homepage(value: object, *, strict: bool = False, label: str = "hom
         if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
             raise ValueError("missing http(s) scheme or hostname")
         _ = parsed.port
-        return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), parsed.params, parsed.query, ""))
+        # A trailing slash can select a different document and changes relative links.
+        # Only the origin-root slash is equivalent to an empty HTTP path.
+        path = "" if parsed.path == "/" and not parsed.params else parsed.path
+        return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, path, parsed.params, parsed.query, ""))
     except ValueError:
         if strict:
             raise ValueError(f"{label} must be an http(s) URL with a valid hostname and port: {public_http.redact_url(value)}") from None

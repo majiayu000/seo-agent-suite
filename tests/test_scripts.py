@@ -150,7 +150,7 @@ class RepoSeoBaselineTests(unittest.TestCase):
                 if output_args:
                     payload = json.loads(result.stdout)
                     self.assertEqual(payload["status"], "error")
-                    self.assertEqual(list(payload["site"]), [f"https://{authority}/docs?view=full"])
+                    self.assertEqual(list(payload["site"]), [f"https://{authority}/docs/?view=full"])
 
     def test_manifest_homepage_credentials_are_redacted_before_output(self) -> None:
         module = load_script("repo_seo_baseline.py")
@@ -1700,7 +1700,7 @@ class OriginResourceTests(unittest.TestCase):
                         code, payload = self.run_audit(name, origin + path, port)
                         self.assertEqual(code, 0)
                         if name == "repo_seo_baseline.py":
-                            item = payload["site"][origin + path.rstrip("/")]["sitemap"]
+                            item = payload["site"][origin + path]["sitemap"]
                             self.assertEqual(payload["errors"], [])
                             self.assertEqual(item["status"], "ok")
                         else:
@@ -1709,7 +1709,7 @@ class OriginResourceTests(unittest.TestCase):
                             self.assertFalse(first["present"])
                         self.assertTrue(item["present"])
                         self.assertEqual(item["url"], origin + "/project/sitemap.xml")
-                        expected_page = path.rstrip("/") if name == "repo_seo_baseline.py" else path
+                        expected_page = path
                         self.assertEqual(paths, [expected_page, "/robots.txt", "/sitemap.xml", "/project/sitemap.xml"])
 
     def test_docs_sitemap_is_valid_but_docs_robots_cannot_replace_origin_robots(self):
@@ -1725,17 +1725,17 @@ class OriginResourceTests(unittest.TestCase):
                 if name == "repo_seo_baseline.py":
                     self.assertEqual(code, 0)
                     self.assertEqual(payload["errors"], [])
-                    robots = payload["site"][origin + "/docs"]["robots"]
+                    robots = payload["site"][origin + "/docs/"]["robots"]
                     self.assertFalse(robots["present"])
                     self.assertEqual(robots["http_status"], 404)
                     self.assertEqual(robots["observation"], "not_configured")
                     self.assertEqual(robots["url"], origin + "/robots.txt")
-                    self.assertEqual(payload["site"][origin + "/docs"]["sitemap"]["url"], origin + "/docs/sitemap.xml")
+                    self.assertEqual(payload["site"][origin + "/docs/"]["sitemap"]["url"], origin + "/docs/sitemap.xml")
                 else:
                     self.assertEqual(code, 0)  # Metadata CLI keeps its existing page-status exit contract.
                     self.assertFalse(payload["checks"]["has_robots_txt"])
                     self.assertTrue(payload["checks"]["has_sitemap_xml"])
-                expected_page = "/docs" if name == "repo_seo_baseline.py" else "/docs/"
+                expected_page = "/docs/"
                 self.assertEqual(paths, [expected_page, "/robots.txt", "/sitemap.xml", "/docs/sitemap.xml"])
 
     def test_origin_resources_pass_for_docs_and_pathless_homepages(self):
@@ -1749,7 +1749,7 @@ class OriginResourceTests(unittest.TestCase):
                     code, payload = self.run_audit(name, origin + path, port)
                     self.assertEqual(code, 0)
                     if name == "repo_seo_baseline.py":
-                        checks = payload["site"][origin + path.rstrip("/")]
+                        checks = payload["site"][origin + path]
                         self.assertEqual(checks["robots"]["status"], "ok")
                         self.assertEqual(checks["sitemap"]["status"], "ok")
                     else:
@@ -1758,7 +1758,7 @@ class OriginResourceTests(unittest.TestCase):
                         self.assertTrue(checks["has_sitemap_xml"])
                         self.assertEqual(len(checks["robots_txt"]), 1)
                         self.assertEqual(len(checks["sitemap_xml"]), 2 if path else 1)
-                    expected_page = path.rstrip("/") or "/" if name == "repo_seo_baseline.py" else path or "/"
+                    expected_page = path or "/"
                     expected_paths = [expected_page, "/robots.txt", "/sitemap.xml"]
                     if path:
                         expected_paths.append("/docs/sitemap.xml")

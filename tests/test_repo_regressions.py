@@ -28,7 +28,21 @@ class RepoRegressions(unittest.TestCase):
         return code, json.loads(stream.getvalue()), run, site
 
     def test_homepage_query_preserved(self):
-        self.assertEqual(repo.normalize_homepage('https://site.example/docs/?lang=zh#part'), 'https://site.example/docs?lang=zh')
+        self.assertEqual(repo.normalize_homepage('https://site.example/docs/?lang=zh#part'), 'https://site.example/docs/?lang=zh')
+
+    def test_homepage_path_slashes_remain_distinct(self):
+        urls = ['https://site.example/docs', 'https://site.example/docs/',
+                'https://site.example/docs//', 'https://site.example/docs/;v=1?lang=zh']
+        for url in urls:
+            with self.subTest(url=url):
+                self.assertEqual(repo.normalize_homepage(url + '#part'), url)
+        manifests = {'npm': [{'homepage': url} for url in urls], 'errors': []}
+        self.assertEqual(repo.infer_homepages(manifests), urls)
+
+    def test_explicit_homepage_keeps_directory_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, _, site = self.run_main(Path(tmp), '--homepage', 'https://site.example/docs/')
+        self.assertIn(mock.call('https://site.example/docs/'), site.call_args_list)
 
     def test_invalid_homepages_do_not_abort_metadata(self):
         for value in ([], 42, {}, 'https://[bad/', 'https://site.example:bad/', 'https:///missing', 'ftp://site.example'):
