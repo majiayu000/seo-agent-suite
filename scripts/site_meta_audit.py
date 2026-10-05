@@ -337,7 +337,9 @@ def resource_present(item: dict, filename: str, evidence: dict | None = None) ->
         return False, item.get("reason", "not HTTP 200")
     body = str(item.get("body") or "").strip()
     content_type = str(item.get("content_type") or "").lower()
-    if "<html" in body[:500].lower() or "text/html" in content_type:
+    # Sitemap XML can contain comments or XHTML-prefixed child elements.
+    # Let its parsed root identify the document, rather than arbitrary text.
+    if "text/html" in content_type or (filename != "sitemap.xml" and "<html" in body[:500].lower()):
         return False, "looks like HTML, not a crawl resource"
     if filename == "sitemap.xml":
         evidence = evidence if evidence is not None else sitemap_evidence(item)
@@ -345,6 +347,11 @@ def resource_present(item: dict, filename: str, evidence: dict | None = None) ->
             return False, "invalid sitemap XML"
         if evidence["root"] not in {"urlset", "sitemapindex"}:
             return False, "missing sitemap XML root"
+        # Preserve the existing namespace-less compatibility mode, whose
+        # expected_namespace evidence remains false. Foreign vocabularies
+        # must not pass merely because their local root name is familiar.
+        if evidence.get("namespace") is not None and not evidence.get("expected_namespace"):
+            return False, "unexpected sitemap XML namespace"
     return True, ""
 
 
