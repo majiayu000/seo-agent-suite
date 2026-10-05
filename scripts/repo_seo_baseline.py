@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -58,15 +59,28 @@ def run_cmd(args: list[str], cwd: Path | None = None, timeout: int = 20) -> dict
     }
 
 
+def finite_json_number(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("JSON number must be finite")
+    return number
+
+
 def read_json(path: Path) -> tuple[dict | None, dict | None]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(
+            path.read_text(encoding="utf-8"),
+            parse_float=finite_json_number,
+            parse_constant=finite_json_number,
+        )
     except UnicodeDecodeError as exc:
         return None, {"status": "error", "path": str(path), "reason": f"invalid UTF-8: {exc}"}
     except OSError as exc:
         return None, {"status": "error", "path": str(path), "reason": str(exc)}
     except json.JSONDecodeError as exc:
         return None, {"status": "error", "path": str(path), "reason": f"invalid JSON: {exc}"}
+    except (ValueError, RecursionError):
+        return None, {"status": "error", "path": str(path), "reason": "JSON value exceeds supported numeric or nesting limits"}
     if not isinstance(data, dict):
         return None, {"status": "error", "path": str(path), "reason": "JSON root must be an object"}
     return data, None

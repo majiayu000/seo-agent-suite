@@ -44,6 +44,36 @@ class RepoRegressions(unittest.TestCase):
             _, _, _, site = self.run_main(Path(tmp), '--homepage', 'https://site.example/docs/')
         self.assertIn(mock.call('https://site.example/docs/'), site.call_args_list)
 
+    def test_nonfinite_json_numbers_are_structured_manifest_errors(self):
+        for value in ('NaN', 'Infinity', '-Infinity', '1e9999'):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / 'package.json').write_text('{"publishConfig": {"number": ' + value + '}}')
+                code, payload, _, _ = self.run_main(root)
+                self.assertEqual(code, 1)
+                self.assertEqual(payload['manifests']['npm'], [])
+                self.assertEqual(payload['manifests']['errors'][0]['status'], 'error')
+                json.dumps(payload, allow_nan=False)
+
+    def test_finite_manifest_numbers_keep_their_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'package.json'
+            path.write_text('{"integer":9007199254740993,"decimal":1.25,"exponent":1e3}')
+            data, diagnostic = repo.read_json(path)
+        self.assertIsNone(diagnostic)
+        self.assertEqual(data, {'integer': 9007199254740993, 'decimal': 1.25, 'exponent': 1000.0})
+
+    def test_json_decoder_limits_become_structured_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'package.json'
+            path.write_text('{}')
+            for error in (ValueError('integer conversion limit'), RecursionError('nesting')):
+                with self.subTest(error=type(error).__name__), mock.patch.object(repo.json, 'loads', side_effect=error):
+                    data, diagnostic = repo.read_json(path)
+                self.assertIsNone(data)
+                self.assertEqual(diagnostic['status'], 'error')
+                self.assertIn('JSON', diagnostic['reason'])
+
     def test_invalid_homepages_do_not_abort_metadata(self):
         for value in ([], 42, {}, 'https://[bad/', 'https://site.example:bad/', 'https:///missing', 'ftp://site.example'):
             with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp:
