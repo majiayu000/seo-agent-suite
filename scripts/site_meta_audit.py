@@ -41,14 +41,25 @@ class MetaParser(HTMLParser):
         self._in_json_ld = False
         self.json_ld: list[dict] = []
         self._json_ld_parts: list[str] = []
+        self._template_depth = 0
+        self._svg_depth = 0
+        self._raw_text_tag: str | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "template":
+            self._template_depth += 1
+        if self._template_depth:
+            return
+        if tag == "svg":
+            self._svg_depth += 1
+        if tag in {"script", "style"}:
+            self._raw_text_tag = tag
         attr = {key.lower(): value or "" for key, value in attrs}
         if tag in {"head", "body"}:
             self._location = tag
         elif tag == "base" and self._location == "head" and self.base_href is None:
             self.base_href = attr.get("href")
-        elif tag == "title":
+        elif tag == "title" and not self._svg_depth:
             self._in_title = True
         elif tag == "h1":
             self._in_h1 = True
@@ -65,6 +76,14 @@ class MetaParser(HTMLParser):
             self._json_ld_parts = []
 
     def handle_endtag(self, tag: str) -> None:
+        if self._template_depth:
+            if tag == "template":
+                self._template_depth -= 1
+            return
+        if tag == "svg":
+            self._svg_depth = max(0, self._svg_depth - 1)
+        if tag == self._raw_text_tag:
+            self._raw_text_tag = None
         if tag in {"head", "body"}:
             self._location = "outside_head_body"
         elif tag == "title":
@@ -80,8 +99,12 @@ class MetaParser(HTMLParser):
             self._in_json_ld = False
 
     def handle_data(self, data: str) -> None:
+        if self._template_depth:
+            return
         if self._in_json_ld:
             self._json_ld_parts.append(data)
+        elif self._raw_text_tag is not None:
+            return
         elif self._in_title:
             self.title += data
         elif self._in_h1:
