@@ -301,7 +301,10 @@ def collect_manifests(root: Path) -> dict:
 
 def collect_readmes(root: Path) -> list[dict]:
     readmes = []
-    for path in sorted(path for directory in (root, root / ".github", root / "docs") for path in directory.glob("README*")):
+    for path in sorted(
+        path for directory in (root, root / ".github", root / "docs")
+        for path in directory.glob("*") if path.name.lower().startswith("readme")
+    ):
         if not path.is_file():
             continue
         try:
@@ -434,7 +437,10 @@ def collect_community_files(root: Path) -> dict:
     paths = {
         "readme": [item["path"] for item in collect_readmes(root)],
         "license": [name for name in ["LICENSE", "LICENSE.md", "COPYING"] if (root / name).is_file()],
-        **{key: sorted(str((directory / name).relative_to(root)) for directory in directories for name in names if (directory / name).is_file()) for key, names in {
+        **{key: sorted(
+            str(path.relative_to(root)) for directory in directories for path in directory.glob("*")
+            if path.is_file() and path.name.lower() in {name.lower() for name in names}
+        ) for key, names in {
             "contributing": ["CONTRIBUTING.md", "CONTRIBUTING"],
             "code_of_conduct": ["CODE_OF_CONDUCT.md", "CODE_OF_CONDUCT"],
             "security": ["SECURITY.md", "SECURITY"],
