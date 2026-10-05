@@ -489,7 +489,16 @@ def evaluate_shipwise_project(root: Path, project_yaml: Path) -> dict:
         item for item in topics
         if not isinstance(item, str) or re.fullmatch(r"[a-z0-9-]{1,50}", item) is None
     ]
-    duplicate_topics = sorted({item for item in topics if topics.count(item) > 1}, key=str)
+    # Invalid topic values may be unhashable; retain them as error evidence.
+    duplicate_topics = []
+    for item in topics:
+        if topics.count(item) > 1 and item not in duplicate_topics:
+            duplicate_topics.append(item)
+    duplicate_topics.sort(key=str)
+    invalid_keyword_indexes = [
+        index for index, item in enumerate(keywords)
+        if not isinstance(item, str) or not item.strip()
+    ]
     repeated_primary = (
         description.lower().count(primary_keyword.lower()) > 1 if primary_keyword and description else False
     )
@@ -505,7 +514,12 @@ def evaluate_shipwise_project(root: Path, project_yaml: Path) -> dict:
             {"primary_keyword": primary_keyword, "description": description},
             "primary keyword must appear in discoverability.description",
         ),
-        "keywords": check_item(bool(keywords), keywords, "missing discoverability.keywords"),
+        "keywords": check_item(
+            bool(keywords) and not invalid_keyword_indexes,
+            keywords,
+            f"discoverability.keywords has invalid nonblank-string entries at indexes {invalid_keyword_indexes}"
+            if invalid_keyword_indexes else "missing discoverability.keywords",
+        ),
         "topics_count": check_item(5 <= len(topics) <= 20, len(topics), "topics must contain 5 to 20 entries"),
         "topics_format": check_item(not invalid_topics, invalid_topics, "topics must be lowercase hyphenated GitHub topic slugs"),
         "topics_unique": check_item(not duplicate_topics, duplicate_topics, "topics must not contain duplicates"),
