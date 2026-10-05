@@ -105,6 +105,13 @@ for client support and marketplace management.
 
 ## Choose an audit and interpret its report
 
+The raw-HTML metadata collector excludes template descendants (including
+shadow-root templates), SVG titles, and script/style source from document
+metadata or heading text. Rendered template/shadow-tree content and CSS
+visibility require the separate rendered-DOM workflow; this collector is not
+a full HTML5 DOM parser.
+
+
 | Task | Start here | What to inspect |
 | --- | --- | --- |
 | Review a repository before launch | `repo_seo_baseline.py --root /absolute/repo/path --json` | `readmes`, `community_files`, manifests and collected GitHub metadata |
