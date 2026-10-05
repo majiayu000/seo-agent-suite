@@ -11,25 +11,31 @@ Use this skill before relying on external SEO data. Read `references/data-source
 
 1. State the claim that needs proof.
 2. Pick the smallest source that can prove it.
-3. Verify whether the provider is installed/authenticated in the current environment.
-4. If unavailable, mark it as a blocker or hypothesis, not a confirmed finding.
-5. Attach the data source to each SEO claim.
+3. Check the actual available tool/endpoint, authentication, and property scope. An installed MCP does not imply access to every underlying API capability.
+4. Before an actual provider call, record current plan/permission/quota constraints and the intended request scale (targets, queries, markets, devices, depth, repeats). Use current provider/account evidence for cost estimates; record unknown costs explicitly. Continue within existing authorization and budget; clarify only a missing decision that changes the result or exceeds that scope.
+5. If unavailable, mark the affected claim as a blocker or hypothesis; continue independent local dry-audit work.
+6. Attach the evidence record below to each SEO claim. Choose the same measurement scope for before/after comparisons.
 
 ## Provider Roles
 
 - Local scripts: repo/package/site metadata and crawlability baseline.
 - Firecrawl: rendered crawl and competitor page extraction.
-- Google Search Console: owned-site indexing, queries, impressions, sitemap submission.
+- Google Search Console: owned-property query/performance evidence and indexed-version inspection; sitemap submission only when that action is authorized.
 - PageSpeed/CrUX: lab and field performance evidence.
 - DataForSEO: keyword, SERP, and competitor data via API.
 - SE Ranking: packaged SEO/GEO workflows and share-of-voice style reporting.
-- Ahrefs: backlinks, content gap, competing pages, and authority estimates.
+- Backlinks: existing authorized Search Console Links exports for owned-site samples, or available DataForSEO/Ahrefs tools for their index and competitor scope.
+- AI visibility: authorized Bing Webmaster Tools citation reports for supported surfaces, or provider-defined prompt samples; document what the metric measures.
 
 ## Output
 
-A short data-source decision record: the claim, the chosen source, why the
-smaller sources were insufficient, access status (installed / needs auth /
-unavailable), and cost boundary. Attach it to the audit report or issue.
+A short decision and evidence record attached to the audit report or issue:
+
+- Claim and confidence; chosen provider and actual tool/endpoint; why a smaller source is insufficient; access status and any applicable request/cost boundary.
+- `collected_at` with timezone; measurement window; property/domain/URL scope; region, language, device, filters, and aggregation used (or `unknown` / not applicable).
+- Returned rows, pagination/depth and truncation/sampling limits; redacted raw response/export reference or reproducible public evidence; unresolved limitations.
+
+Use the provider-specific boundaries in `references/data-sources.md`; an empty response is not proof that traffic, links, or citations do not exist.
 
 ## Failure Handling
 

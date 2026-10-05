@@ -29,6 +29,30 @@ Shipwise is the planning and record layer. SEO Agent Suite is the execution laye
 3. Record decisions and links in the Shipwise project folder when the work affects launch or relaunch readiness.
 4. Keep provider credentials outside both repositories.
 
+For a content brief, consume the project's existing keyword map and positioning
+first. Link query, user task, current/target URL, and the update/merge/new
+decision to evidence; use Shipwise's keyword template without duplicating tier
+definitions here. If Shipwise is absent, deliver the same standalone brief
+without requiring a project record.
+
+Use existing project fields for the evidence handoff:
+
+- `signals.sources_checked` and `signals.retrieval_date` identify sources and
+  collection date; `signals.decision`, `signals.local_issue`, and
+  `signals.local_pr` link the decision and implementation where applicable.
+- `verification.verification_command`, `verification.verification_date`,
+  `verification.expected_output`, and `verification.proof_asset_path` capture
+  completed product checks and proof assets, when applicable.
+- The existing `proof.md` Claim Inventory carries source/command, date,
+  verification status, and publishability. Keep SEO confidence
+  (`Confirmed`/`Likely`/`Hypothesis`) in the linked audit report rather than
+  inventing new Shipwise status values or treating readiness as visibility.
+
+Link the audit report's raw evidence, measurement scope, retest/done criteria,
+and before/after observations from these records. Distinguish verified local
+changes, live deployment, engine indexing, and measured effect; do not mark
+unknown outcomes verified. No additional project schema is required.
+
 ## Machine Handoff
 
 When a Shipwise project record exists, pass it to the baseline collector:

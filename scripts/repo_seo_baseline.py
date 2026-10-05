@@ -11,6 +11,7 @@ import subprocess
 import sys
 import urllib.parse
 from pathlib import Path
+from datetime import datetime, timezone
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
@@ -25,7 +26,7 @@ from public_http import (  # noqa: E402
     request_public_url_once,
     validate_public_http_url,
 )
-from site_meta_audit import check_candidates  # noqa: E402
+from site_meta_audit import crawl_resource_checks  # noqa: E402
 
 try:
     import tomllib
@@ -84,17 +85,35 @@ def read_toml(path: Path) -> tuple[dict | None, dict | None]:
         return None, {"status": "error", "path": str(path), "reason": f"invalid TOML: {exc}"}
 
 
-def normalize_homepage(value: str | None, *, strict: bool = False, label: str = "homepage") -> str | None:
-    if not value:
+def redact_evidence(value: object) -> object:
+    """Remove URL userinfo from manifest URLs and command diagnostics."""
+    if isinstance(value, str):
+        return re.sub(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+", lambda match: public_http.redact_url(match.group()), value)
+    if isinstance(value, list):
+        return [redact_evidence(item) for item in value]
+    if isinstance(value, dict):
+        return {key: redact_evidence(item) for key, item in value.items()}
+    return value
+
+
+def normalize_homepage(value: object, *, strict: bool = False, label: str = "homepage") -> str | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        if strict:
+            raise ValueError(f"{label} must be a string containing an http(s) URL")
         return None
     value = value.strip()
-    if value.startswith(("http://", "https://")):
+    try:
         parsed = urllib.parse.urlparse(value)
-        normalized = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", "", ""))
-        return normalized.rstrip("/")
-    if strict:
-        raise ValueError(f"{label} must be an http(s) URL: {public_http.redact_url(value)}")
-    return None
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("missing http(s) scheme or hostname")
+        _ = parsed.port
+        return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), parsed.params, parsed.query, ""))
+    except ValueError:
+        if strict:
+            raise ValueError(f"{label} must be an http(s) URL with a valid hostname and port: {public_http.redact_url(value)}") from None
+        return None
 
 
 def should_check_site_resources(url: str) -> bool:
@@ -117,12 +136,16 @@ def should_check_site_resources(url: str) -> bool:
 def site_resource_checks(homepage: str) -> dict:
     checks = {"homepage": http_check(homepage)}
     if should_check_site_resources(homepage):
-        for resource, filename in (("robots", "robots.txt"), ("sitemap", "sitemap.xml")):
-            candidates = check_candidates(homepage, filename)
+        resources = crawl_resource_checks(homepage)
+        for resource, key in (("robots", "robots_txt"), ("sitemap", "sitemap_xml")):
+            candidates = resources[key]
             item = next((candidate for candidate in candidates if candidate["present"]), candidates[0])
-            if not item["present"]:
-                item["status"] = "error"
-            checks[resource] = item
+            checks[resource] = dict(item)
+            if not item["present"] and item.get("observation") != "not_configured":
+                checks[resource]["status"] = "error"
+            checks[resource]["candidates"] = candidates
+        if "sitemap_discovery" in resources:
+            checks["sitemap"]["sitemap_discovery"] = resources["sitemap_discovery"]
     else:
         skipped = {"status": "skipped", "reason": "registry or source-host URL, not a project site"}
         checks["robots"] = skipped
@@ -161,6 +184,8 @@ def collect_manifests(root: Path) -> dict:
         manifest = {
             "path": str(path.relative_to(root)),
             "name": data.get("name"),
+            "version": data.get("version"),
+            "private": data.get("private") is True,
             "description": data.get("description"),
             "homepage": data.get("homepage"),
             "repository": data.get("repository"),
@@ -190,6 +215,8 @@ def collect_manifests(root: Path) -> dict:
             manifests["cargo"] = {
                 "path": "Cargo.toml",
                 "name": package.get("name"),
+                "version": package.get("version"),
+                "publish": package.get("publish"),
                 "description": package.get("description"),
                 "homepage": package.get("homepage"),
                 "repository": package.get("repository"),
@@ -200,6 +227,35 @@ def collect_manifests(root: Path) -> dict:
             if name_error:
                 manifests["errors"].append(name_error)
                 manifests["cargo"].update({"status": "error", "reason": name_error["reason"]})
+
+    workspace = cargo_data.get("workspace", {}) if cargo_data else {}
+    if isinstance(workspace, dict) and workspace.get("members"):
+        metadata = run_cmd(["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked", "--offline"], cwd=root)
+        manifests["cargo_members"] = []
+        try:
+            if metadata.get("status") != "ok":
+                raise ValueError("cargo metadata unavailable or failed")
+            data = json.loads(metadata.get("stdout", ""))
+            if not isinstance(data, dict) or not isinstance(data.get("workspace_members"), list) or not isinstance(data.get("packages"), list):
+                raise ValueError("invalid cargo metadata")
+            for package in data["packages"]:
+                if not isinstance(package, dict) or package.get("id") not in data["workspace_members"]:
+                    continue
+                path = Path(package["manifest_path"])
+                manifest = {field: package.get(field) for field in (
+                    "name", "version", "description", "homepage", "repository", "readme", "keywords", "categories", "publish"
+                )}
+                manifest["path"] = str(path.relative_to(root))
+                name_error = registry_name_error(manifest["name"], "cargo", manifest["path"])
+                if name_error:
+                    manifests["errors"].append(name_error)
+                    manifest.update({"status": "error", "reason": name_error["reason"]})
+                if path == cargo:
+                    manifests["cargo"] = manifest
+                else:
+                    manifests["cargo_members"].append(manifest)
+        except (ValueError, KeyError, TypeError):
+            manifests["errors"].append({"status": "error", "path": "Cargo.toml", "reason": "cannot collect Cargo workspace members", "detail": redact_evidence(metadata)})
 
     pyproject = root / "pyproject.toml"
     pyproject_data = None
@@ -228,7 +284,7 @@ def collect_manifests(root: Path) -> dict:
 
 def collect_readmes(root: Path) -> list[dict]:
     readmes = []
-    for path in sorted(root.glob("README*")):
+    for path in sorted(path for directory in (root, root / ".github", root / "docs") for path in directory.glob("README*")):
         if not path.is_file():
             continue
         try:
@@ -249,18 +305,17 @@ def collect_readmes(root: Path) -> list[dict]:
 
 def infer_homepages(manifests: dict) -> list[str]:
     urls: list[str] = []
-    cargo = manifests.get("cargo") or {}
-    cargo_home = normalize_homepage(cargo.get("homepage")) if isinstance(cargo, dict) else None
-    if cargo_home:
-        urls.append(cargo_home)
-
-    for item in manifests.get("npm", []):
+    for item in [manifests.get("cargo"), *manifests.get("cargo_members", []), *manifests.get("npm", [])]:
         if not isinstance(item, dict):
             continue
-        homepage = normalize_homepage(item.get("homepage"))
+        value = item.get("homepage")
+        try:
+            homepage = normalize_homepage(value, strict=True)
+        except ValueError as exc:
+            manifests["errors"].append({"status": "error", "path": item["path"], "reason": str(exc)})
+            continue
         if homepage and homepage not in urls:
             urls.append(homepage)
-
     return urls
 
 
@@ -334,7 +389,7 @@ def parse_shipwise_discoverability(path: Path) -> dict:
             data[current_list].append(parse_scalar(line.removeprefix("    - ")))
             continue
         if not line.startswith("  ") or ":" not in line:
-            raise ValueError(f"{path}: unsupported discoverability line: {line}")
+            raise ValueError(f"{path}: unsupported discoverability line")
         key, raw_value = line.strip().split(":", 1)
         value = [] if raw_value.strip() == "" else parse_scalar(raw_value)
         data[key] = value
@@ -353,14 +408,27 @@ def check_item(ok: bool, evidence: object, reason: str = "") -> dict:
 
 
 def collect_community_files(root: Path) -> dict:
+    directories = (root, root / ".github", root / "docs")
     issue_templates = root / ".github" / "ISSUE_TEMPLATE"
+    paths = {
+        "readme": [item["path"] for item in collect_readmes(root)],
+        "license": [name for name in ["LICENSE", "LICENSE.md", "COPYING"] if (root / name).is_file()],
+        **{key: sorted(str((directory / name).relative_to(root)) for directory in directories for name in names if (directory / name).is_file()) for key, names in {
+            "contributing": ["CONTRIBUTING.md", "CONTRIBUTING"],
+            "code_of_conduct": ["CODE_OF_CONDUCT.md", "CODE_OF_CONDUCT"],
+            "security": ["SECURITY.md", "SECURITY"],
+        }.items()},
+    }
+    template_candidates = sorted(
+        str(path.relative_to(root)) for path in issue_templates.iterdir()
+        if path.is_file() and path.suffix.lower() in {".md", ".yml", ".yaml"}
+        and path.name.lower() not in {"config.yml", "config.yaml"} and path.stat().st_size > 0
+    ) if issue_templates.is_dir() else []
     return {
-        "readme": (root / "README.md").exists() or any(root.glob("README.*")),
-        "license": any((root / name).exists() for name in ["LICENSE", "LICENSE.md", "COPYING"]),
-        "contributing": any((root / name).exists() for name in ["CONTRIBUTING.md", "CONTRIBUTING"]),
-        "code_of_conduct": any((root / name).exists() for name in ["CODE_OF_CONDUCT.md", "CODE_OF_CONDUCT"]),
-        "security": any((root / name).exists() for name in ["SECURITY.md", "SECURITY"]),
-        "issue_templates": issue_templates.is_dir() and any(issue_templates.iterdir()),
+        **{key: bool(value) for key, value in paths.items()},
+        "issue_templates": bool(template_candidates),
+        "community_file_paths": paths,
+        "issue_template_candidates": template_candidates,
     }
 
 
@@ -445,8 +513,8 @@ def evaluate_shipwise_project(root: Path, project_yaml: Path) -> dict:
         ),
         "support_path": check_item(
             community_files["issue_templates"] and community_files["contributing"],
-            community_files,
-            "support path requires both issue templates and CONTRIBUTING",
+            {**community_files, "validation_scope": "candidate file presence; GitHub support path not validated"},
+            "support path candidates require both issue templates and CONTRIBUTING",
         ),
     }
 
@@ -467,7 +535,7 @@ def collect_errors(evidence: dict) -> list[dict]:
 
     for homepage, checks in evidence.get("site", {}).items():
         for resource, resource_check in checks.items():
-            if resource_check.get("status") == "error":
+            if resource_check.get("status") == "error" and resource_check.get("observation") != "not_configured":
                 errors.append({
                     "surface": "site",
                     "resource": resource,
@@ -482,12 +550,36 @@ def collect_errors(evidence: dict) -> list[dict]:
     return errors
 
 
+def crate_registry_check(name: str, local_version: object = None) -> dict:
+    url = "https://crates.io/api/v1/crates/" + urllib.parse.quote(name, safe="")
+    response = public_http.fetch_public_url(url)
+    result = {key: value for key, value in response.items() if key != "body"}
+    result.update({"registry": "crates.io", "local_version": local_version})
+    if response.get("http_status") == 404:
+        result["observation"] = "missing"
+    if response.get("status") != "ok":
+        return result
+    try:
+        if response.get("body_truncated"):
+            raise ValueError("truncated crates.io response")
+        data = json.loads(response.get("body", ""))
+        crate = data.get("crate") if isinstance(data, dict) else None
+        if not isinstance(crate, dict) or crate.get("id") != name or not isinstance(crate.get("max_version"), str):
+            raise ValueError("crates.io response lacks exact crate identity/version")
+        result.update({"name": crate["id"], "published_version": crate["max_version"], "package_url": "https://crates.io/crates/" + name})
+        if isinstance(local_version, str):
+            result["version_matches"] = local_version == crate["max_version"]
+    except ValueError:
+        result.update({"status": "error", "reason": "cannot verify exact crate identity/version from crates.io response"})
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Collect repo/package SEO baseline evidence.")
     parser.add_argument("--root", default=".", help="Repository root to inspect.")
     parser.add_argument("--homepage", action="append", default=[], help="Homepage URL to check. Can be repeated.")
     parser.add_argument("--npm", action="append", default=[], help="npm package name to verify. Can be repeated.")
-    parser.add_argument("--crate", action="append", default=[], help="crates.io package name to search. Can be repeated.")
+    parser.add_argument("--crate", action="append", default=[], help="crates.io package name to verify. Can be repeated.")
     parser.add_argument("--project-yaml", help="Shipwise project.yaml to validate against discoverability checks.")
     parser.add_argument("--json", action="store_true", help="Emit JSON output.")
     args = parser.parse_args()
@@ -502,7 +594,18 @@ def main() -> int:
         ]
     except ValueError as exc:
         parser.error(str(exc))
-    homepages = list(dict.fromkeys(explicit_homepages + infer_homepages(manifests)))
+    repo_view = run_cmd(["gh", "repo", "view", "--json", "nameWithOwner,description,homepageUrl,repositoryTopics,visibility,defaultBranchRef"], cwd=root)
+    github_homepages = []
+    if repo_view.get("status") == "ok":
+        try:
+            github = json.loads(repo_view.get("stdout", ""))
+            homepage = normalize_homepage(github.get("homepageUrl"), strict=True, label="GitHub homepage") if isinstance(github, dict) else None
+            if homepage:
+                github_homepages.append(homepage)
+        except (ValueError, TypeError):
+            if repo_view.get("stdout"):
+                repo_view.update({"status": "error", "reason": "cannot collect GitHub homepage from repo metadata"})
+    homepages = list(dict.fromkeys(explicit_homepages + infer_homepages(manifests) + github_homepages))
     npm_packages: list[str] = []
     crate_names: list[str] = []
     for option, values, registry, names in (
@@ -513,21 +616,21 @@ def main() -> int:
             name_error = registry_name_error(name, registry, option)
             if name_error:
                 manifests["errors"].append(name_error)
-            else:
+            elif name not in names:
                 names.append(name)
 
     for item in manifests.get("npm", []):
         if (
             isinstance(item, dict) and item.get("status") != "error"
-            and item.get("name") and item["name"] not in npm_packages
+            and not item.get("private") and item.get("name") and item["name"] not in npm_packages
         ):
             npm_packages.append(item["name"])
-    cargo = manifests.get("cargo")
-    if (
-        isinstance(cargo, dict) and cargo.get("status") != "error"
-        and cargo.get("name") and cargo["name"] not in crate_names
-    ):
-        crate_names.append(cargo["name"])
+    cargo_packages = [item for item in [manifests.get("cargo"), *manifests.get("cargo_members", [])] if isinstance(item, dict)]
+    for cargo in cargo_packages:
+        publish = cargo.get("publish")
+        public_target = publish is None or publish is True or (isinstance(publish, list) and "crates-io" in publish)
+        if cargo.get("status") != "error" and cargo.get("name") and public_target and cargo["name"] not in crate_names:
+            crate_names.append(cargo["name"])
 
     shipwise = {}
     if args.project_yaml:
@@ -536,10 +639,6 @@ def main() -> int:
             shipwise = evaluate_shipwise_project(root, project_yaml)
         except ValueError as exc:
             parser.error(str(exc))
-
-    for item in [*manifests.get("npm", []), manifests.get("cargo")]:
-        if isinstance(item, dict) and isinstance(item.get("homepage"), str):
-            item["homepage"] = public_http.redact_url(item["homepage"])
 
     site = {}
     for homepage in homepages:
@@ -551,30 +650,24 @@ def main() -> int:
 
     evidence = {
         "root": str(root),
+        "collected_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "git": {
             "status": run_cmd(["git", "status", "--short", "--branch"], cwd=root),
             "remote": run_cmd(["git", "remote", "get-url", "origin"], cwd=root),
-            "repo_view": run_cmd(
-                [
-                    "gh",
-                    "repo",
-                    "view",
-                    "--json",
-                    "nameWithOwner,description,homepageUrl,repositoryTopics,visibility,defaultBranchRef",
-                ],
-                cwd=root,
-            ),
+            "head": run_cmd(["git", "rev-parse", "HEAD"], cwd=root),
+            "repo_view": repo_view,
         },
         "manifests": manifests,
         "readmes": collect_readmes(root),
         "registry": {
-            "npm": {pkg: run_cmd(["npm", "view", "--json", "--", pkg], cwd=root) for pkg in npm_packages},
-            "crates": {crate: run_cmd(["cargo", "search", "--limit", "3", "--", crate], cwd=root) for crate in crate_names},
+            "npm": {pkg: run_cmd(["npm", "view", "--json", "--registry", "https://registry.npmjs.org", "--", pkg], cwd=root) for pkg in npm_packages},
+            "crates": {crate: crate_registry_check(crate, next((item.get("version") for item in cargo_packages if item.get("name") == crate), None)) for crate in crate_names},
         },
         "site": site,
         "community_files": collect_community_files(root),
         "shipwise": shipwise,
     }
+    evidence = redact_evidence(evidence)
     errors = collect_errors(evidence)
     evidence["status"] = "error" if errors else "ok"
     evidence["errors"] = errors
