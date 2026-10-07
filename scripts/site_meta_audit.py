@@ -36,7 +36,7 @@ class MetaParser(HTMLParser):
         self.meta: list[dict[str, str]] = []
         self.links: list[dict[str, str]] = []
         self.base_href: str | None = None
-        self._location = "outside_head_body"
+        self._location = "head"
         self.json_ld_count = 0
         self._in_json_ld = False
         self.json_ld: list[dict] = []
@@ -50,6 +50,12 @@ class MetaParser(HTMLParser):
             self._template_depth += 1
         if self._template_depth:
             return
+        # HTML permits an omitted head tag. The first body element closes the
+        # implicit head; subsequent metadata must not reopen it.
+        if self._location == "head" and tag not in {
+            "html", "head", "base", "link", "meta", "title", "style", "script", "noscript",
+        }:
+            self._location = "body"
         if tag == "svg":
             self._svg_depth += 1
         if tag in {"script", "style"}:
@@ -109,6 +115,8 @@ class MetaParser(HTMLParser):
             self.title += data
         elif self._in_h1:
             self._current_h1.append(data)
+        elif self._location == "head" and data.strip():
+            self._location = "body"
 
     def finish(self) -> None:
         self.close()

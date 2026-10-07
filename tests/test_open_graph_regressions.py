@@ -108,7 +108,7 @@ class OpenGraphRegressionTests(unittest.TestCase):
                   "og:image:alt": "An image"}
         result = self.audit_html("".join(f'<meta property="{key}" content="{value}">' for key, value in fields.items()))
         self.assertEqual(result["open_graph"], fields)
-        self.assertTrue(all(x["location"] == "outside_head_body" for x in result["open_graph_declarations"]))
+        self.assertTrue(all(x["location"] == "head" for x in result["open_graph_declarations"]))
 
     def test_non_image_and_twitter_duplicate_semantics_are_unchanged(self):
         result = self.audit_html('''<head><meta property="og:title" content="First">
