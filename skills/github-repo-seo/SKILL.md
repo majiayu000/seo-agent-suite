@@ -12,24 +12,29 @@ Keep claims evidence-based. Separate `locally healthy`, `merged on GitHub`, `pub
 ## Workflow
 
 1. Start from current state. Run `git status --short --branch`; record the branch, commit and collection time. If remote currency matters, fetch the relevant remote for evidence and compare its ref, without pulling, merging, resetting, switching or otherwise synchronizing the user's branch. Label local and remote states separately rather than calling an unverified checkout latest.
-2. Run the baseline collector from the SEO Agent Suite repository or installed
-   plugin root. Keep `--root` pointed at the repository being audited:
+2. Run the baseline collector via the `seo-agent` CLI (preferred) or legacy
+   scripts from the suite/plugin root. Keep `--root` pointed at the repository
+   being audited:
 
 ```bash
-python3 scripts/repo_seo_baseline.py --root /absolute/path/to/target-repo --json
+seo-agent repo-baseline --root /absolute/path/to/target-repo --json
+# legacy: python3 scripts/repo_seo_baseline.py --root /absolute/path/to/target-repo --json
 ```
 
-3. If a Shipwise project record exists, include it:
+3. If an optional Shipwise project record exists, include it:
 
 ```bash
-python3 scripts/repo_seo_baseline.py --root /absolute/path/to/target-repo --project-yaml /absolute/path/to/project.yaml --json
+seo-agent repo-baseline --root /absolute/path/to/target-repo --project-yaml /absolute/path/to/project.yaml --json
 ```
 
 4. If a public site exists, run:
 
 ```bash
-python3 scripts/site_meta_audit.py <homepage> --json
+seo-agent site-meta <homepage> --json
+# legacy: python3 scripts/site_meta_audit.py <homepage> --json
 ```
+
+Prefer the Report Envelope `findings[]` when writing the audit report.
 
 5. Search exact brand, repo, package, and docs-site names when search visibility is the question.
 6. Record repo, docs site, package registry, and release discoverability separately.

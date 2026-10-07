@@ -1,7 +1,7 @@
 {
   "name": "seo-agent-suite",
-  "version": "0.1.0",
-  "description": "Evidence-backed SEO and discoverability audit skills for open-source projects, docs sites, package registries, and GEO/AEO workflows.",
+  "version": "0.2.0",
+  "description": "Evidence-backed SEO and discoverability audits for agents (CLI, skills, optional MCP) across open-source projects, docs sites, package registries, and GEO/AEO workflows.",
   "author": {
     "name": "majiayu000",
     "email": "1835304752@qq.com",
@@ -16,13 +16,15 @@
     "geo",
     "aeo",
     "codex-plugin",
+    "mcp",
+    "agent",
     "shipwise"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "SEO Agent Suite",
     "shortDescription": "Audit repo, package, site, and GEO SEO evidence.",
-    "longDescription": "SEO Agent Suite turns Shipwise discoverability guidance into executable Codex workflows for repository metadata, package registries, technical site SEO, content/GEO planning, and provider selection. It keeps local dry-audits separate from paid or authenticated data sources.",
+    "longDescription": "SEO Agent Suite provides evidence-backed repo, package, site, and GEO SEO workflows for Codex, Cursor, Claude Code, and MCP clients. Local dry-audits stay separate from paid or authenticated data sources. Shipwise is an optional discoverability planning adapter.",
     "developerName": "majiayu000",
     "category": "Productivity",
     "capabilities": [

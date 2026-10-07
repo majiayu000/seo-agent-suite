@@ -9,3 +9,8 @@ dist/
 coverage/
 .pytest_cache/
 tmp/
+*.egg-info/
+build/
+.eggs/
+.venv/
+venv/
