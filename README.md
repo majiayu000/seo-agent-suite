@@ -46,7 +46,7 @@ python3 scripts/site_meta_audit.py https://example.com/ --json
 
 ### Report Envelope
 
-JSON output (CLI and scripts with `--json`) includes a stable envelope **in addition to** legacy evidence fields:
+CLI JSON output includes a stable envelope **in addition to** legacy evidence fields:
 
 | Field | Meaning |
 | --- | --- |
