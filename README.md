@@ -129,8 +129,54 @@ launch-readiness verdict.
 
 For the page audit, exit code **0** means the target page was fetched successfully.
 Missing metadata and crawl resources can still appear as **false** in `checks`.
-A non-zero exit reports a page-fetch failure or invalid input. Inspect the JSON
+A non-zero exit reports a page-fetch failure, invalid input, or an explicitly
+selected findings threshold. Inspect the JSON
 rather than treating either script's exit code as a search-performance score.
+
+To use page findings as an optional CI gate:
+
+```bash
+python3 scripts/site_meta_audit.py https://example.com/page --json --fail-on error
+```
+
+`--fail-on error|warning|info` returns **1** when a finding meets or exceeds the
+chosen severity; without it, the page-fetch exit behavior stays the same.
+Invalid CLI arguments still return **2**. Intentional `noindex` or crawl blocks
+can trigger a gate too; apply it only to URLs whose intended behavior fits it.
+
+The page report adds `assessment` and `findings` alongside the presence checks:
+
+- `assessment.crawl_access` evaluates the final page URL for `Googlebot`,
+  `OAI-SearchBot`, and `GPTBot` separately, retaining the selected user-agent
+  group and winning rule/line. Specific groups override `*`; repeated groups
+  are merged, the longest matching rule wins, and Allow wins equal-length ties.
+  Matching includes case-sensitive paths, query strings, UTF-8/percent escapes,
+  `*`, and `$`. A robots 404/410 means no configured restriction. Other failed,
+  HTML, or truncated robots responses leave permission `null` (unknown).
+  This is a local rule interpretation, not a live bot/CDN probe or cached-crawler
+  decision. Blocking an AI bot is reported as information, not advice to allow it.
+- `assessment.indexing` evaluates head-level robots/Googlebot meta declarations
+  and applicable `X-Robots-Tag` headers, including `none` and conflicting
+  declarations. `noindex: false` means no such directive was observed in the
+  complete response; truncated HTML without an observed noindex reports `null`.
+  `indexed` remains `unknown`. A robots block can prevent crawlers seeing noindex;
+  neither crawl permission nor a successful fetch proves indexing.
+- `assessment.canonical` distinguishes missing, invalid, conflicting, self,
+  other, and unknown HTML declarations using the final URL and document base.
+  Host case, default ports and unreserved percent escapes are normalized for
+  comparison. A different canonical target is a warning to review intent,
+  not an invalid-URL verdict. HTTP Link canonical headers remain evidence for
+  manual review and make the overall canonical assessment unknown.
+- `assessment.json_ld_parse_valid` reports JSON parsing only: `null` when absent
+  or capture coverage is incomplete. A parsed value does not establish Schema.org
+  validity or rich-result eligibility. Title/description character lengths and
+  nonempty H1 count are observations, without fixed length limits or a one-H1 gate.
+- Every finding has `severity`, `confidence` (`Confirmed`, `Likely`, or
+  `Hypothesis`), a message and an evidence path. Observed noindex, Googlebot
+  Disallow, invalid/conflicting HTML canonicals and malformed/empty JSON-LD are
+  errors; incomplete evidence, non-self canonicals and missing title/description
+  are warnings; AI crawl restrictions and heading-count review are information.
+  These severities support local gates, not ranking or index-state measurements.
 
 Both reports include `collected_at`; repository evidence also includes the Git
 HEAD. For pages, inspect `robots_meta_declarations`, `canonicals`, `json_ld`,

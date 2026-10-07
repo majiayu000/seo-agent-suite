@@ -1,5 +1,8 @@
 """Offline regressions for metadata evidence and crawl-resource discovery."""
 
+import contextlib
+import io
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -10,6 +13,9 @@ import site_meta_audit as site
 
 
 class SiteRegressionTests(unittest.TestCase):
+    clean_html = '''<head><title>Example</title><meta name="description" content="Example description">
+        <link rel="canonical" href="https://example.com/docs/page"></head><body><h1>Example</h1></body>'''
+
     def response(self, url, body="", code=200, **extra):
         return {"status": "ok" if code == 200 else "error", "url": url,
                 "http_status": code, "body": body, "body_truncated": False,
@@ -20,6 +26,171 @@ class SiteRegressionTests(unittest.TestCase):
         page = self.response(url, body, content_type="text/html", **extra)
         with patch.object(site, "fetch", side_effect=lambda target: page if target == url else self.response(target, code=404)):
             return site.audit(url)
+
+    def run_cli(self, result, *args):
+        with patch.object(site, "audit", return_value=result), patch.object(sys, "argv", ["site_meta_audit.py", result["url"], *args]), contextlib.redirect_stdout(io.StringIO()) as output:
+            code = site.main()
+        return code, output.getvalue()
+
+    def test_problem_page_produces_findings_and_opt_in_failure(self):
+        url = "https://example.com/docs/page"
+        html = self.clean_html.replace('href="https://example.com/docs/page"', 'href="https://other.example/article"').replace('</head>', '<meta property="og:title" content="Example"><meta name="robots" content="noindex"><script type="application/ld+json">{bad}</script></head>').replace('</body>', '<h1>Second</h1></body>')
+        def fetch(target):
+            if target == url:
+                return self.response(url, html, content_type="text/html", x_robots_tag=["noindex"])
+            if target.endswith("robots.txt"):
+                return self.response(target, "User-agent: *\nDisallow: /\n")
+            return self.response(target, "<urlset/>", content_type="application/xml")
+        with patch.object(site, "fetch", side_effect=fetch):
+            result = site.audit(url)
+        self.assertTrue(all(value for key, value in result["checks"].items() if key.startswith("has_")))
+        self.assertTrue(result["assessment"]["indexing"]["noindex"])
+        self.assertEqual(result["assessment"]["indexing"]["indexed"], "unknown")
+        self.assertEqual(result["assessment"]["canonical"]["status"], "other")
+        self.assertFalse(result["assessment"]["json_ld_parse_valid"])
+        self.assertEqual(result["assessment"]["observations"]["nonempty_h1_count"], 2)
+        findings = {item["code"]: item for item in result["findings"]}
+        for code in ("noindex_declared", "robots_disallow_googlebot", "json_ld_parse_error"):
+            self.assertEqual(findings[code]["severity"], "error")
+            self.assertEqual(findings[code]["confidence"], "Confirmed")
+        self.assertIn("noindex_hidden_by_robots", findings)
+        self.assertEqual(findings["robots_disallow_gptbot"]["severity"], "info")
+        self.assertEqual(self.run_cli(result)[0], 0)
+        code, output = self.run_cli(result, "--json", "--fail-on", "error")
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(output)["findings"], result["findings"])
+        self.assertIn("error [Confirmed] noindex_declared", self.run_cli(result)[1])
+
+    def test_clean_page_and_severity_thresholds(self):
+        clean = self.audit_html(self.clean_html)
+        self.assertEqual(clean["findings"], [])
+        self.assertIsNone(clean["assessment"]["json_ld_parse_valid"])
+        for level in ("error", "warning", "info"):
+            self.assertEqual(self.run_cli(clean, "--fail-on", level)[0], 0)
+        warning = self.audit_html(self.clean_html.replace('href="https://example.com/docs/page"', 'href="https://other.example/"'))
+        self.assertEqual(self.run_cli(warning, "--fail-on", "error")[0], 0)
+        self.assertEqual(self.run_cli(warning, "--fail-on", "warning")[0], 1)
+        info = self.audit_html(self.clean_html.replace('</body>', '<h1>Other heading</h1></body>'))
+        self.assertEqual(self.run_cli(info, "--fail-on", "warning")[0], 0)
+        self.assertEqual(self.run_cli(info, "--fail-on", "info")[0], 1)
+        with patch.object(sys, "argv", ["site_meta_audit.py", clean["url"], "--fail-on", "invalid"]), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+            site.main()
+        self.assertEqual(error.exception.code, 2)
+
+    def test_fetch_failure_preserves_json_and_exit_contract(self):
+        with patch.object(site, "fetch", return_value=self.response("https://example.com/", code=503)):
+            result = site.audit("https://example.com/")
+        for args in ((), ("--fail-on", "info"), ("--fail-on", "error")):
+            code, output = self.run_cli(result, "--json", *args)
+            self.assertEqual(code, 1)
+            self.assertEqual(json.loads(output)["page"]["http_status"], 503)
+            self.assertEqual(json.loads(output)["findings"][0]["code"], "page_fetch_error")
+        self.assertNotIn("assessment", result)
+
+    def test_noindex_scope_conflicts_and_header_parameters(self):
+        cases = [
+            ('<meta name="robots" content="index"><meta name="Googlebot" content="NoIndex">', [], True),
+            ('<meta name="robots" content="NONE">', [], True),
+            ('<meta name="googlebot-news" content="noindex">', [], False),
+            ('<meta name="robots" content="noindex-example">', [], False),
+            ('', ["otherbot: noindex"], False),
+            ('', ["otherbot: index, noindex"], False),
+            ('', ["otherbot: index, GOOGLEBOT: noindex, nofollow"], True),
+            ('', ["otherbot: noindex", "index", "noindex"], True),
+            ('', ["max-snippet: 0, noindex"], True),
+            ('', ["unavailable_after: Wed, 25 Jun 2010 15:00:00 GMT, noindex"], True),
+        ]
+        for tags, headers, expected in cases:
+            with self.subTest(tags=tags, headers=headers):
+                result = self.audit_html('<head>' + tags + '</head>', x_robots_tag=headers)
+                self.assertIs(result["assessment"]["indexing"]["noindex"], expected)
+        body = self.audit_html('<head></head><body><meta name="robots" content="noindex"></body>')
+        self.assertFalse(body["assessment"]["indexing"]["noindex"])
+
+    def test_robots_specific_groups_merge_and_preserve_matching_evidence(self):
+        text = '''\ufeffUser-agent: *
+Disallow: /
+User-agent: OAI-SearchBot
+Sitemap: https://example.com/map.xml
+User-agent: Googlebot
+Disallow: /docs
+
+User-agent: oai-searchbot
+Allow: /docs/page
+User-agent: GPTBot
+Disallow:
+'''
+        result = site.robots_access(self.response("https://example.com/robots.txt", text), "https://example.com/docs/page")
+        self.assertFalse(result["Googlebot"]["allowed"])
+        self.assertTrue(result["OAI-SearchBot"]["allowed"])
+        self.assertTrue(result["GPTBot"]["allowed"])
+        self.assertEqual(result["OAI-SearchBot"]["matched_rule"], {"directive": "allow", "pattern": "/docs/page", "line": 9})
+        self.assertEqual(result["GPTBot"]["matched_agents"], ["gptbot"])
+
+    def test_robots_matching_precedence_encoding_and_query(self):
+        cases = [
+            ("Disallow: /\nAllow: /docs", "/docs/page", True),
+            ("Allow: /docs\nDisallow: /docs", "/docs/page", True),
+            ("Disallow: /*.php$", "/page.php?x=1", True),
+            ("Disallow: /*.php$", "/page.php", False),
+            ("Disallow: /docs/*?private=", "/docs/page?private=1#fragment", False),
+            ("Disallow: /Docs", "/docs", True),
+            ("Disallow: /中文", "/%E4%B8%AD%E6%96%87", False),
+            ("Disallow: /%e4%b8%ad", "/中", False),
+            ("Disallow: /%70age", "/page", False),
+            ("Disallow: /a%2Fb", "/a/b", True),
+            ("Disallow: /a%2Fb", "/a%2fb", False),
+            ("Allow: /page\nDisallow: /*.htm", "/page.htm", False),
+            ("Allow: /page\nDisallow: /*.ph", "/page.php5", True),
+            ("Disallow: / # comment", "/robots.txt", True),
+        ]
+        for rules, path, allowed in cases:
+            with self.subTest(rules=rules, path=path):
+                result = site.robots_access(self.response("https://example.com/robots.txt", "User-agent: *\n" + rules), "https://example.com" + path)
+                self.assertIs(result["Googlebot"]["allowed"], allowed)
+
+    def test_robots_missing_and_unavailable_are_distinct(self):
+        for code, extra, expected in ((404, {}, True), (410, {}, True), (403, {}, None), (429, {}, None), (503, {}, None), (200, {"body_truncated": True}, None), (200, {"content_type": "text/html"}, None)):
+            with self.subTest(code=code, extra=extra):
+                result = site.robots_access(self.response("https://example.com/robots.txt", "User-agent: *\nDisallow: /", code, **extra), "https://example.com/docs/page")
+                self.assertIs(result["Googlebot"]["allowed"], expected)
+
+    def test_canonical_syntax_duplicates_and_equivalent_urls(self):
+        for href, expected in (("https://EXAMPLE.com:443/docs/page", "self"), ("/docs/%70age", "self"), ("https://other.example/docs/page", "other"), ("javascript:bad", "invalid"), ("https://example.com:bad/", "invalid"), ("https://bad host/", "invalid"), ("/docs/page#part", "invalid"), ("", "invalid")):
+            with self.subTest(href=href):
+                result = self.audit_html(self.clean_html.replace("https://example.com/docs/page", href))
+                self.assertEqual(result["assessment"]["canonical"]["status"], expected)
+        conflict = self.audit_html(self.clean_html.replace('</head>', '<link rel="canonical" href="/other"></head>'))
+        self.assertEqual(conflict["assessment"]["canonical"]["status"], "conflicting")
+        duplicate = self.audit_html(self.clean_html.replace('</head>', '<link rel="canonical" href="https://EXAMPLE.com:443/docs/page"></head>'))
+        self.assertEqual(duplicate["assessment"]["canonical"]["status"], "self")
+        self.assertIn("canonical_multiple", {item["code"] for item in duplicate["findings"]})
+        body = self.audit_html('<head></head><body><link rel="canonical" href="/docs/page"></body>')
+        self.assertEqual(body["assessment"]["canonical"]["status"], "invalid")
+        preload = self.audit_html(self.clean_html, link_headers=['</style.css>; rel="preload"'])
+        self.assertEqual(preload["assessment"]["canonical"]["status"], "self")
+        header = self.audit_html(self.clean_html, link_headers=['<https://other.example/>; rel="canonical"'])
+        self.assertEqual(header["assessment"]["canonical"]["status"], "unknown")
+        self.assertTrue(header["assessment"]["canonical"]["http_link_headers_need_review"])
+
+    def test_truncated_page_reports_unknown_without_inventing_absence(self):
+        result = self.audit_html('<head>', body_truncated=True)
+        self.assertIsNone(result["assessment"]["indexing"]["noindex"])
+        self.assertIsNone(result["assessment"]["json_ld_parse_valid"])
+        self.assertEqual(result["assessment"]["canonical"]["status"], "unknown")
+        codes = {item["code"] for item in result["findings"]}
+        self.assertIn("capture_incomplete", codes)
+        self.assertNotIn("title_missing", codes)
+        self.assertNotIn("meta_description_missing", codes)
+        noindex = self.audit_html('<head><meta name="robots" content="noindex">', body_truncated=True)
+        self.assertTrue(noindex["assessment"]["indexing"]["noindex"])
+
+    def test_lengths_are_observations_and_json_parse_is_not_schema_validation(self):
+        result = self.audit_html(self.clean_html.replace('Example</title>', 'X' * 500 + '</title>').replace('Example description', 'Y' * 500).replace('</head>', '<script type="application/ld+json">42</script></head>'))
+        self.assertTrue(result["assessment"]["json_ld_parse_valid"])
+        self.assertEqual(result["assessment"]["observations"]["title_length"], 500)
+        self.assertEqual(result["assessment"]["observations"]["description_length"], 500)
+        self.assertEqual(result["findings"], [])
 
     def test_all_directives_canonicals_and_hreflang_survive(self):
         result = self.audit_html('''<head><base href="/localized/">

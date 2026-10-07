@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import urllib.parse
 from datetime import datetime, timezone
@@ -20,6 +21,8 @@ import public_http
 from public_http import fetch_public_url, redact_url  # noqa: E402
 
 _MAX_SITEMAP_CANDIDATES = 10
+_CRAWLERS = ("Googlebot", "OAI-SearchBot", "GPTBot")
+_SEVERITY = {"info": 0, "warning": 1, "error": 2}
 
 
 class MetaParser(HTMLParser):
@@ -194,6 +197,80 @@ def resource_check(item: dict, filename: str) -> dict:
     return result
 
 
+def robots_path(value: str) -> str:
+    """Compare UTF-8 and percent escapes without decoding reserved characters."""
+    value = urllib.parse.quote(value, safe="/%:*?$!&'()+,;=@[]-._~")
+    def normalize(match: re.Match) -> str:
+        byte = int(match.group(1), 16)
+        char = chr(byte)
+        return char if char.isascii() and (char.isalnum() or char in "-._~") else "%" + match.group(1).upper()
+    return re.sub(r"%([0-9a-fA-F]{2})", normalize, value)
+
+
+def robots_match(pattern: str, target: str) -> bool:
+    # Literal segments avoid regex backtracking on untrusted wildcard patterns.
+    anchored = pattern.endswith("$")
+    parts = (pattern[:-1] if anchored else pattern).split("*")
+    if not target.startswith(parts[0]):
+        return False
+    offset = len(parts[0])
+    if len(parts) == 1:
+        return not anchored or offset == len(target)
+    for part in parts[1:-1]:
+        found = target.find(part, offset)
+        if found < 0:
+            return False
+        offset = found + len(part)
+    if anchored:
+        return target.endswith(parts[-1]) and len(target) - len(parts[-1]) >= offset
+    return target.find(parts[-1], offset) >= 0
+
+
+def robots_access(item: dict, url: str) -> dict:
+    """Local rule evaluation, not proof of CDN access or crawler behavior/cache."""
+    base = {"allowed": None, "matched_agents": [], "matched_rule": None}
+    if item.get("http_status") in {404, 410}:
+        return {agent: {**base, "allowed": True, "reason": "not_configured"} for agent in _CRAWLERS}
+    if item.get("status") != "ok" or item.get("http_status") != 200 or item.get("body_truncated") or not resource_present(item, "robots.txt")[0]:
+        return {agent: {**base, "reason": "robots_unavailable_or_incomplete"} for agent in _CRAWLERS}
+    groups = []
+    agents, rules = [], []
+    has_rule = False
+    for number, line in enumerate(str(item.get("body") or "").lstrip("\ufeff").splitlines(), 1):
+        name, separator, value = line.split("#", 1)[0].partition(":")
+        if not separator:
+            continue
+        name, value = name.strip().lower(), value.strip()
+        if name == "user-agent":
+            if has_rule:
+                groups.append((agents, rules))
+                agents, rules, has_rule = [], [], False
+            agents.append(value.lower())
+        elif name in {"allow", "disallow"} and agents:
+            has_rule = True
+            if value.startswith("/"):
+                rules.append({"directive": name, "pattern": value, "line": number})
+    groups.append((agents, rules))
+    parsed = urllib.parse.urlsplit(url)
+    target = robots_path((parsed.path or "/") + ("?" + parsed.query if parsed.query else ""))
+    output = {}
+    for agent in _CRAWLERS:
+        # Product-token match, with Google's documented version/wildcard suffixes.
+        selected = [(names, entries) for names, entries in groups if any(
+            name.split("/", 1)[0].rstrip("*") == agent.lower() for name in names if name != "*")]
+        if not selected:
+            selected = [(names, entries) for names, entries in groups if "*" in names]
+        matches = [rule for _, entries in selected for rule in entries if robots_match(robots_path(rule["pattern"]), target)]
+        winner = max(matches, key=lambda rule: (len(urllib.parse.unquote_to_bytes(robots_path(rule["pattern"]).rstrip("*"))), rule["directive"] == "allow"), default=None)
+        output[agent] = {
+            "allowed": winner is None or winner["directive"] == "allow" or parsed.path == "/robots.txt",
+            "matched_agents": sorted({name for names, _ in selected for name in names}),
+            "matched_rule": {**winner, "pattern": redact_url(winner["pattern"])} if winner else None,
+            "reason": "matched_rule" if winner else "no_matching_rule",
+        }
+    return output
+
+
 def crawl_resource_checks(base_url: str) -> dict:
     robots = [fetch(candidate) for candidate in resource_candidates(base_url, "robots.txt")]
     declarations = []
@@ -212,6 +289,7 @@ def crawl_resource_checks(base_url: str) -> dict:
     robots_truncated = any(item.get("body_truncated") for item in robots)
     return {
         "robots_txt": [resource_check(item, "robots.txt") for item in robots],
+        "robots_access": robots_access(robots[0], base_url),
         "sitemap_xml": [resource_check(fetch(candidate), "sitemap.xml") for candidate in checked],
         "sitemap_discovery": {
             "declaration_count": len(declarations), "unique_candidate_count": len(candidates),
@@ -270,13 +348,121 @@ def resource_present(item: dict, filename: str, evidence: dict | None = None) ->
     return True, ""
 
 
+def indexing_evidence(parser: MetaParser, page: dict) -> dict:
+    evidence = [{"source": "meta", "value": item.get("content", "")} for item in parser.meta
+                if item.get("location") == "head" and item.get("name", "").lower() in {"robots", "googlebot"}]
+    noindex = any(set(re.split(r"[\s,]+", item["value"].lower())) & {"noindex", "none"} for item in evidence)
+    for header in page.get("x_robots_tag", []):
+        scope = ""
+        for part in header.lower().split(","):
+            prefix, separator, value = part.strip().partition(":")
+            # These are parameterized directives, not crawler scopes.
+            if separator and prefix in {"unavailable_after", "max-snippet", "max-image-preview", "max-video-preview"}:
+                continue
+            if separator and re.fullmatch(r"[a-z_-]+", prefix.strip()):
+                scope, part = prefix.strip(), value
+            if scope in {"", "googlebot"} and set(part.strip().split()) & {"noindex", "none"}:
+                noindex = True
+        evidence.append({"source": "x_robots_tag", "value": header})
+    return {"crawler": "Googlebot", "noindex": True if noindex else None if page.get("body_truncated") else False,
+            "evidence": evidence, "scope": "observed_raw_response", "indexed": "unknown"}
+
+
+def canonical_key(url: str) -> tuple:
+    parsed = urllib.parse.urlsplit(url)
+    return (parsed.scheme.lower(), (parsed.hostname or "").lower(),
+            parsed.port or (443 if parsed.scheme.lower() == "https" else 80),
+            robots_path(parsed.path or "/"), robots_path(parsed.query))
+
+
+def canonical_assessment(result: dict) -> dict:
+    declarations = result["canonicals"]
+    targets = []
+    invalid = False
+    for item in declarations:
+        target = item.get("resolved_url")
+        try:
+            parsed = urllib.parse.urlsplit(target or "")
+            valid = (parsed.scheme in {"http", "https"} and bool(parsed.hostname) and parsed.port != 0
+                     and not parsed.fragment and not any(char.isspace() for char in target or "")
+                     and item.get("location") == "head")
+        except ValueError:
+            valid = False
+        invalid |= not valid
+        if valid:
+            targets.append(urllib.parse.urldefrag(target)[0])
+    targets = list({canonical_key(target): target for target in targets}.values())
+    complete = not result["capture"]["body_truncated"]
+    # HTTP Link declarations are retained, but aren't parsed by this HTML check.
+    headers_need_review = any(re.search(r'\brel\s*=\s*(?:"[^"\n]*\bcanonical\b|canonical(?:\s|;|,|$))', header, re.I)
+                              for header in result["page"].get("link_headers", []))
+    if invalid:
+        status = "invalid"
+    elif len(targets) > 1:
+        status = "conflicting"
+    elif not complete or headers_need_review:
+        status = "unknown"
+    elif not targets:
+        status = "missing"
+    else:
+        status = "self" if canonical_key(targets[0]) == canonical_key(result["page"]["url"]) else "other"
+    return {"status": status, "targets": targets, "declaration_count": len(declarations),
+            "scope": "html_links", "http_link_headers_need_review": headers_need_review}
+
+
+def assess(result: dict, parser: MetaParser, resources: dict) -> None:
+    findings = result["findings"]
+    def add(code: str, severity: str, message: str, evidence: str, confidence: str = "Confirmed") -> None:
+        findings.append({"code": code, "severity": severity, "confidence": confidence, "message": message, "evidence": evidence})
+    indexing = indexing_evidence(parser, result["page"])
+    canonical = canonical_assessment(result)
+    json_ld = result["json_ld"]
+    parse_valid = all(item["status"] == "parsed" for item in json_ld) if json_ld else None
+    if result["capture"]["body_truncated"]:
+        parse_valid = None
+        add("capture_incomplete", "warning", "HTML is truncated; absence and complete validation are unknown.", "capture")
+    result["assessment"] = {
+        "crawl_access": resources["robots_access"], "indexing": indexing, "canonical": canonical,
+        "json_ld_parse_valid": parse_valid,
+        "observations": {"title_length": len(result["title"]), "description_length": len(result["meta_description"] or ""), "nonempty_h1_count": len(result["h1"])},
+    }
+    if indexing["noindex"]:
+        add("noindex_declared", "error", "The observed response declares noindex for Googlebot; this does not measure current index state.", "assessment.indexing")
+    for agent, access in resources["robots_access"].items():
+        if access["allowed"] is False:
+            add("robots_disallow_" + agent.lower(), "error" if agent == "Googlebot" else "info", f"robots.txt disallows this URL for {agent}; this does not prove deindexing or actual network access.", "assessment.crawl_access." + agent)
+        elif access["allowed"] is None:
+            add("robots_unknown_" + agent.lower(), "warning", f"Cannot determine robots.txt permission for {agent} from this response.", "assessment.crawl_access." + agent)
+    if indexing["noindex"] and resources["robots_access"]["Googlebot"]["allowed"] is False:
+        add("noindex_hidden_by_robots", "warning", "A robots.txt block can prevent Googlebot from seeing noindex; removal from the index is not established.", "assessment")
+    if canonical["status"] in {"invalid", "conflicting"}:
+        add("canonical_" + canonical["status"], "error", "HTML canonical declarations are invalid or conflicting.", "canonicals")
+    elif canonical["status"] == "other":
+        add("canonical_other", "warning", "HTML canonical points to another URL; verify that this is intentional. It is a signal, not a noindex directive.", "canonicals", "Likely")
+    elif canonical["status"] == "unknown":
+        add("canonical_unknown", "warning", "Canonical assessment is incomplete; review capture coverage and HTTP Link headers.", "assessment.canonical")
+    if len(result["canonicals"]) > 1:
+        add("canonical_multiple", "warning", "Multiple HTML canonical declarations were observed.", "canonicals")
+    if any(item["status"] in {"invalid_json", "empty"} for item in json_ld):
+        add("json_ld_parse_error", "error", "At least one JSON-LD block is empty or invalid JSON. Parsing is separate from schema validity.", "json_ld")
+    elif any(item["status"] == "incomplete_script" for item in json_ld):
+        add("json_ld_incomplete", "warning", "An unfinished JSON-LD script cannot be validated.", "json_ld")
+    for key in ("title", "meta_description"):
+        if not result[key] and not result["capture"]["body_truncated"]:
+            add(key + "_missing", "warning", f"No nonempty {key} was observed.", key)
+    if len(result["h1"]) != 1:
+        add("h1_review", "info", "Review the observed heading hierarchy in context; H1 count alone is not an indexing failure.", "h1", "Likely")
+
+
 def audit(url: str) -> dict:
     collected_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     page = fetch(url)
     result = {"url": redact_url(url), "collected_at": collected_at,
               "capture": {"scope": "raw_html", "body_truncated": page.get("body_truncated"), "rendered": False},
-              "page": {key: value for key, value in page.items() if key != "body"}}
+              "page": {key: value for key, value in page.items() if key != "body"}, "findings": []}
     if page.get("status") != "ok":
+        result["findings"].append({"code": "page_fetch_error", "severity": "error", "confidence": "Confirmed",
+                                   "message": "Page fetch failed; metadata assessment is unavailable.", "evidence": "page"})
         return result
 
     parser = MetaParser()
@@ -314,6 +500,7 @@ def audit(url: str) -> dict:
             },
         }
     )
+    assess(result, parser, resources)
     return result
 
 
@@ -321,6 +508,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Audit crawlable page metadata.")
     parser.add_argument("url", help="Public URL to inspect.")
     parser.add_argument("--json", action="store_true", help="Emit JSON output.")
+    parser.add_argument("--fail-on", choices=tuple(_SEVERITY), help="Exit 1 for findings at this severity or higher; default only fails on page fetch errors.")
     args = parser.parse_args()
     # Leave URL/DNS validation to audit→fetch so --json always emits structured
     # page errors (exit 1) instead of argparse usage text (exit 2) on resolution failures.
@@ -336,7 +524,11 @@ def main() -> int:
         print(f"title: {result.get('title')}")
         print(f"description: {result.get('meta_description')}")
         print(f"canonical: {result.get('canonical')}")
-    return 0 if result.get("page", {}).get("status") == "ok" else 1
+        for finding in result["findings"]:
+            print(f"{finding['severity']} [{finding['confidence']}] {finding['code']}: {finding['message']}")
+    if result.get("page", {}).get("status") != "ok":
+        return 1
+    return int(bool(args.fail_on and any(_SEVERITY[item["severity"]] >= _SEVERITY[args.fail_on] for item in result["findings"])))
 
 
 if __name__ == "__main__":
