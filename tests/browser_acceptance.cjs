@@ -1,5 +1,5 @@
 // Optional integration acceptance: requires Playwright + its Chromium, and a tiny WebM.
-// Usage: node tests/browser_acceptance.cjs <artifact-directory> <fixture.webm>
+// Usage: node tests/browser_acceptance.cjs <artifact-directory> <fixture.webm> [--fixtures-only]
 // Uses a headless browser only. This is a controlled fixture, not a production crawler.
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
@@ -8,8 +8,11 @@ const path = require('node:path');
 const { chromium, devices } = require('playwright');
 
 async function main() {
-  const [output, videoFile] = process.argv.slice(2);
-  if (!output || !videoFile) throw new Error('Expected artifact directory and WebM path');
+  const [output, videoFile, mode, ...extra] = process.argv.slice(2);
+  if (!output || !videoFile || (mode && mode !== '--fixtures-only') || extra.length) {
+    throw new Error('Expected artifact directory, WebM path, and optional --fixtures-only');
+  }
+  const fixturesOnly = mode === '--fixtures-only';
   await fs.mkdir(output, { recursive: true });
   const video = await fs.readFile(videoFile);
   const inventory = ['/', '/linked', '/spa/deep', '/en', '/zh', '/orphan'];
@@ -45,7 +48,7 @@ async function main() {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   origin = `http://127.0.0.1:${server.address().port}`;
   let browser;
-  const report = { collected_at: new Date().toISOString(), scope: 'Controlled fixture plus three public documentation URLs; no sitewide public crawl', checks: {} };
+  const report = { collected_at: new Date().toISOString(), scope: fixturesOnly ? 'Controlled local fixture only; no public page requests' : 'Controlled fixture plus three public documentation URLs; no sitewide public crawl', checks: {} };
   try {
     browser = await chromium.launch({ headless: true });
     report.browser = { engine: 'chromium', version: browser.version(), headless: true, mobile: 'iPhone 13 user agent and viewport emulation; Chromium engine, not an actual iPhone or Googlebot' };
@@ -165,7 +168,8 @@ async function main() {
     }
     report.checks.media = { outcome: 'passed', informative_alt: root.images[0].alt, decorative_alt: root.images[1].alt, image_and_video_and_thumbnail_status: 200, video_metadata_loaded: true, json_ld_matches_visible_video_and_thumbnail: true, rich_result_eligibility: 'not tested by Google Rich Results Test', video_search_appearance: 'unknown' };
     report.public = [];
-    for (const [name, url] of [['python-en', 'https://docs.python.org/3/'], ['python-zh', 'https://docs.python.org/zh-cn/3/'], ['python-turtle', 'https://docs.python.org/3/library/turtle.html']]) {
+    const publicTargets = fixturesOnly ? [] : [['python-en', 'https://docs.python.org/3/'], ['python-zh', 'https://docs.python.org/zh-cn/3/'], ['python-turtle', 'https://docs.python.org/3/library/turtle.html']];
+    for (const [name, url] of publicTargets) {
       const d = await capture(desktop, url, name, false);
       const m = await capture(mobile, url, `${name}-mobile`, false);
       assert.equal(d.http_status, 200);
