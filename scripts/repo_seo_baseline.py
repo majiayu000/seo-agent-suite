@@ -324,6 +324,37 @@ def collect_manifests(root: Path) -> dict:
     return manifests
 
 
+def first_readme_heading(lines: list[str]) -> str | None:
+    """Return stripped ATX source outside top-level fenced code.
+
+    This bounded lexical check handles 0–3-space indentation, ATX levels 1–6,
+    and backtick/tilde fences. It does not parse containers, Setext headings,
+    HTML blocks, or inline Markdown, and preserves the original heading text.
+    """
+    fence_character = None
+    fence_length = 0
+    for line in lines:
+        fence = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if fence_character is not None:
+            if (
+                fence
+                and fence.group(1)[0] == fence_character
+                and len(fence.group(1)) >= fence_length
+                and not fence.group(2).strip(" \t")
+            ):
+                fence_character = None
+            continue
+        if fence:
+            marker, info = fence.groups()
+            if marker[0] == "~" or "`" not in info:
+                fence_character = marker[0]
+                fence_length = len(marker)
+                continue
+        if re.match(r"^ {0,3}#{1,6}(?:[ \t]|$)", line):
+            return line.strip()
+    return None
+
+
 def collect_readmes(root: Path) -> list[dict]:
     readmes = []
     for path in sorted(
@@ -341,7 +372,7 @@ def collect_readmes(root: Path) -> list[dict]:
             {
                 "path": str(path.relative_to(root)),
                 "line_count": len(lines),
-                "first_heading": next((line for line in non_empty if line.startswith("#")), None),
+                "first_heading": first_readme_heading(lines),
                 "first_non_empty": non_empty[0] if non_empty else None,
             }
         )
