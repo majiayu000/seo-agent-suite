@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Recover raw H1 text once across heading boundaries and EOF without stale-buffer
+  duplicates; retain the collector's lexical, non-DOM scope.
+- Decode single-line YAML double-quoted escapes into Unicode values and reject
+  invalid escapes without input disclosure; keep plain/single-quoted backslashes
+  literal and preserve the project-YAML CLI error contract.
+
 - Keep repository JSON reports available when external commands cannot launch
   or emit invalid UTF-8; preserve existing missing-tool/timeout/exit behavior.
 - Separate public performance access from property-authorized Search Console,
