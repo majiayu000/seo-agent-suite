@@ -16,6 +16,26 @@ possible SEO problem has been eliminated.
 - No GSC, backlink-index, keyword-volume or AI visibility account was connected
   during this run. No paid provider calls or sitemap submissions were made.
 
+## Local reliability follow-up: 2026-10-07
+
+**Confirmed:** the combined reliability changes passed all 179 Python tests on
+Python 3.11 and 3.12, plus script compilation and plugin structure validation.
+The offline regressions cover sitemap identity, metadata context, Open Graph
+ordering, Shipwise input/keyword observations, and HTTP response boundaries.
+HTML checks explicitly distinguish unsupported media/codings from missing or
+invalid metadata; applicable response-header noindex remains assessed.
+
+**Confirmed within the controlled fixture:** Playwright 1.55.0 / headless
+Chromium 140.0.7339.16 passed all six browser groups (JavaScript, direct routes,
+mobile, hreflang, orphan inventory and media) using `--fixtures-only` on Node.js
+22.13.0. The run made zero public-page captures. Raw/rendered HTML and the report
+were saved to `/tmp/seo-browser-20261007/artifacts/acceptance.json` on the
+accepting machine; these are ephemeral local artifacts. This follow-up does not
+refresh the October 5 public-site observations or measure search outcomes.
+
+CI now repeats the Python suite on 3.11/3.12 and the controlled browser checks.
+The optional default browser mode still captures the three public URLs.
+
 ## Coverage by exploration area
 
 | Area | Delivered and checked | Remaining measurement boundary |
