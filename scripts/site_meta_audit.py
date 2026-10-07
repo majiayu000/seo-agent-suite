@@ -67,9 +67,10 @@ class MetaParser(HTMLParser):
             self.base_href = attr.get("href")
         elif tag == "title" and not self._svg_depth:
             self._in_title = True
-        elif tag == "h1":
-            self._in_h1 = True
-            self._current_h1 = []
+        elif tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            # Recover lexical evidence at heading boundaries, not an HTML5 DOM.
+            self._finish_h1()
+            self._in_h1 = tag == "h1"
         elif tag == "meta":
             attr["location"] = self._location
             self.meta.append(attr)
@@ -94,11 +95,8 @@ class MetaParser(HTMLParser):
             self._location = "outside_head_body"
         elif tag == "title":
             self._in_title = False
-        elif tag == "h1":
-            self._in_h1 = False
-            text = " ".join("".join(self._current_h1).split())
-            if text:
-                self.h1.append(text)
+        elif tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            self._finish_h1()
         elif tag == "script":
             if self._in_json_ld:
                 self.json_ld.append(json_ld_evidence("".join(self._json_ld_parts)))
@@ -118,8 +116,18 @@ class MetaParser(HTMLParser):
         elif self._location == "head" and data.strip():
             self._location = "body"
 
+    def _finish_h1(self) -> None:
+        """Retain active nonempty H1 text once, including malformed markup."""
+        if self._in_h1:
+            text = " ".join("".join(self._current_h1).split())
+            if text:
+                self.h1.append(text)
+        self._in_h1 = False
+        self._current_h1 = []
+
     def finish(self) -> None:
         self.close()
+        self._finish_h1()
         if self._in_json_ld:
             self.json_ld.append({"status": "incomplete_script", "types": [], "ids": []})
             self._in_json_ld = False
