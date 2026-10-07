@@ -30,6 +30,7 @@ class HttpRegressionTests(unittest.TestCase):
         endpoints = [(http.socket.AF_INET, http.socket.SOCK_STREAM, 6, "", ("8.8.8.8", 80))]
         headers = Message()
         headers["Content-Type"] = "text/html"
+        headers["Content-Encoding"] = "gzip"
         headers["X-Robots-Tag"] = "noindex"
         headers["X-Robots-Tag"] = "googlebot: nofollow"
         headers["Link"] = '<https://public.example/a>; rel="canonical"'
@@ -47,6 +48,7 @@ class HttpRegressionTests(unittest.TestCase):
                 self.assertEqual(connection.request.call_args.args[:2], ("GET", expected))
                 self.assertEqual(result["x_robots_tag"], ["noindex", "googlebot: nofollow"])
                 self.assertEqual(result["link_headers"], headers.get_all("Link"))
+                self.assertEqual(result["content_encoding"], "gzip")
                 connection.close.assert_called_once()
 
     def test_html_meta_charset_decodes_gbk(self):
@@ -83,13 +85,14 @@ class HttpRegressionTests(unittest.TestCase):
         self.assertEqual(self.fetch(text.encode())["body"], text)
 
     def test_redirect_chain_and_final_headers_survive_fetch(self):
-        replies = [response(status=301, location="/moved"), response(status=302, location="/final"), response(x_robots_tag=["noindex", "googlebot: nofollow"], link_headers=['<https://public.example/a>; rel="canonical"'])]
+        replies = [response(status=301, location="/moved"), response(status=302, location="/final"), response(content_encoding="gzip", x_robots_tag=["noindex", "googlebot: nofollow"], link_headers=['<https://public.example/a>; rel="canonical"'])]
         with mock.patch.object(http, "request_public_url_once", side_effect=replies):
             result = http.fetch_public_url("https://public.example/")
         self.assertEqual(result["redirects"], [dict(url="https://public.example/", status=301, location="/moved"), dict(url="https://public.example/moved", status=302, location="/final")])
         self.assertEqual(result["url"], "https://public.example/final")
         self.assertEqual(result["x_robots_tag"], replies[-1]["x_robots_tag"])
         self.assertEqual(result["link_headers"], replies[-1]["link_headers"])
+        self.assertEqual(result["content_encoding"], "gzip")
         self.assertIsNotNone(datetime.fromisoformat(result["collected_at"].replace("Z", "+00:00")).tzinfo)
 
     def test_blocked_redirect_preserves_redacted_evidence(self):

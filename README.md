@@ -109,7 +109,13 @@ The raw-HTML metadata collector excludes template descendants (including
 shadow-root templates), SVG titles, and script/style source from document
 metadata or heading text. Rendered template/shadow-tree content and CSS
 visibility require the separate rendered-DOM workflow; this collector is not
-a full HTML5 DOM parser.
+a full HTML5 DOM parser. An omitted `<head>` is supported until body content
+starts. HTML checks require an HTML/XHTML Content-Type and an unencoded body.
+Non-HTML, unknown-type, and compressed responses report HTML checks as unavailable
+without inventing missing titles or malformed structured data. Applicable
+`X-Robots-Tag` headers are still assessed. Compressed robots/sitemaps are marked
+unsupported (this collector does not decompress them); robots permission and
+sitemap validation remain unknown.
 
 
 | Task | Start here | What to inspect |

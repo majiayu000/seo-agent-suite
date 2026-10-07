@@ -442,6 +442,7 @@ def request_via_proxy(
                 return {
                     "http_status": response.status,
                     "content_type": response.getheader("content-type"),
+                    "content_encoding": response.getheader("content-encoding"),
                     "sample_bytes": len(body),
                     "location": response.getheader("location"),
                     "x_robots_tag": _response_header_values(response, "x-robots-tag"),
@@ -479,6 +480,7 @@ def request_public_url_once(url: str, timeout: int, *, max_body_bytes: int = 204
             return {
                 "http_status": response.status,
                 "content_type": response.getheader("content-type"),
+                "content_encoding": response.getheader("content-encoding"),
                 "sample_bytes": len(body),
                 "location": response.getheader("location"),
                 "x_robots_tag": _response_header_values(response, "x-robots-tag"),
@@ -549,6 +551,7 @@ def follow_public_http(
             "url": safe_url,
             "http_status": status,
             "content_type": response["content_type"],
+            "content_encoding": response.get("content_encoding"),
             "sample_bytes": response["sample_bytes"],
             "location": redact_url(response["location"]) if response["location"] else response["location"],
             "body": response["body"],
@@ -585,6 +588,7 @@ def fetch_public_url(url: str, timeout: int = 20, *, max_body_bytes: int = 1_000
         "url": result["url"],
         "http_status": result["http_status"],
         "content_type": content_type,
+        "content_encoding": result.get("content_encoding"),
         "body": decoded_body,
         "body_truncated": body_truncated,
         "collected_at": result["collected_at"],

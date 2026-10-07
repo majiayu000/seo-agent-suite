@@ -32,6 +32,56 @@ class SiteRegressionTests(unittest.TestCase):
             code = site.main()
         return code, output.getvalue()
 
+    def test_non_html_and_encoded_responses_do_not_fabricate_metadata_absence(self):
+        url = "https://example.com/docs/page"
+        for content_type, encoding in [("application/pdf", None), ("application/json", None),
+                                        ("text/plain", None), (None, None), ("text/html", "gzip")]:
+            with self.subTest(content_type=content_type, encoding=encoding):
+                page = self.response(url, '<meta name="robots" content="noindex">',
+                                     content_type=content_type, content_encoding=encoding)
+                with patch.object(site, "fetch", return_value=page), patch.object(site, "crawl_resource_checks") as crawl:
+                    result = site.audit(url)
+                crawl.assert_not_called()
+                self.assertFalse(result["assessment"]["html_metadata_applicable"])
+                self.assertIsNone(result["assessment"]["indexing"]["noindex"])
+                self.assertEqual(result["capture"]["scope"], "raw_response")
+                self.assertNotIn("checks", result)
+                self.assertNotIn("title", result)
+                self.assertEqual([item["code"] for item in result["findings"]], ["html_metadata_unavailable"])
+                self.assertEqual(self.run_cli(result)[0], 0)
+                self.assertEqual(self.run_cli(result, "--fail-on", "warning")[0], 1)
+
+    def test_non_html_response_still_assesses_header_noindex(self):
+        url = "https://example.com/docs/page"
+        page = self.response(url, "%PDF", content_type="application/pdf", x_robots_tag=["noindex"])
+        with patch.object(site, "fetch", return_value=page):
+            result = site.audit(url)
+        self.assertTrue(result["assessment"]["indexing"]["noindex"])
+        self.assertEqual(self.run_cli(result, "--fail-on", "error")[0], 1)
+
+    def test_identity_encoded_xhtml_remains_applicable(self):
+        url = "https://example.com/docs/page"
+        page = self.response(url, self.clean_html, content_type="Application/XHTML+XML; charset=utf-8",
+                             content_encoding="identity")
+        with patch.object(site, "fetch", side_effect=lambda target: page if target == url else self.response(target, code=404)):
+            result = site.audit(url)
+        self.assertTrue(result["assessment"]["html_metadata_applicable"])
+        self.assertEqual(result["findings"], [])
+
+    def test_compressed_resources_are_unsupported_instead_of_invalid_xml_or_allowed(self):
+        for extra in ({"content_encoding": "gzip"}, {"content_type": "application/gzip"}):
+            with self.subTest(extra=extra):
+                item = self.response("https://example.com/robots.txt", "Sitemap: https://example.com/custom.xml", **extra)
+                self.assertIsNone(site.robots_access(item, "https://example.com/")["Googlebot"]["allowed"])
+                result = site.resource_check(item, "sitemap.xml")
+                self.assertEqual(result["observation"], "unsupported_encoding")
+                self.assertIsNone(result["sitemap_evidence"]["well_formed"])
+                self.assertNotIn("error", result["sitemap_evidence"])
+                with patch.object(site, "fetch", return_value=item):
+                    resources = site.crawl_resource_checks("https://example.com/")
+                self.assertEqual(resources["sitemap_discovery"]["declaration_count"], 0)
+                self.assertFalse(resources["sitemap_discovery"]["complete"])
+
     def test_problem_page_produces_findings_and_opt_in_failure(self):
         url = "https://example.com/docs/page"
         html = self.clean_html.replace('href="https://example.com/docs/page"', 'href="https://other.example/article"').replace('</head>', '<meta property="og:title" content="Example"><meta name="robots" content="noindex"><script type="application/ld+json">{bad}</script></head>').replace('</body>', '<h1>Second</h1></body>')

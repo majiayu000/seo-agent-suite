@@ -252,6 +252,12 @@ def check_candidates(base_url: str, filename: str) -> list[dict]:
     return [resource_check(fetch(candidate), filename) for candidate in resource_candidates(base_url, filename)]
 
 
+def encoded_resource(item: dict) -> bool:
+    encoding = str(item.get("content_encoding") or "").strip().lower()
+    media_type = str(item.get("content_type") or "").split(";", 1)[0].strip().lower()
+    return encoding not in {"", "identity"} or media_type in {"application/gzip", "application/x-gzip", "application/zip"}
+
+
 def resource_check(item: dict, filename: str) -> dict:
     evidence = sitemap_evidence(item) if filename == "sitemap.xml" and item.get("http_status") == 200 else None
     present, reason = resource_present(item, filename, evidence)
@@ -259,6 +265,8 @@ def resource_check(item: dict, filename: str) -> dict:
     result["present"] = present
     if reason:
         result["reason"] = reason
+    if item.get("status") == "ok" and encoded_resource(item):
+        result["observation"] = "unsupported_encoding"
     if filename == "robots.txt" and item.get("http_status") in {404, 410}:
         result["observation"] = "not_configured"
     if evidence is not None:
@@ -344,7 +352,7 @@ def crawl_resource_checks(base_url: str) -> dict:
     robots = [fetch(candidate) for candidate in resource_candidates(base_url, "robots.txt")]
     declarations = []
     for item in robots:
-        if item.get("status") != "ok" or item.get("http_status") != 200:
+        if not resource_present(item, "robots.txt")[0]:
             continue
         for line in str(item.get("body") or "").splitlines():
             name, separator, value = line.partition(":")
@@ -363,7 +371,7 @@ def crawl_resource_checks(base_url: str) -> dict:
         "sitemap_discovery": {
             "declaration_count": len(declarations), "unique_candidate_count": len(candidates),
             "checked_count": len(checked), "omitted_count": len(candidates) - len(checked),
-            "complete": len(checked) == len(candidates) and not robots_truncated,
+            "complete": len(checked) == len(candidates) and not robots_truncated and not any(encoded_resource(item) for item in robots),
             "robots_body_truncated": robots_truncated,
         },
     }
@@ -374,6 +382,8 @@ def sitemap_evidence(item: dict) -> dict:
     evidence: dict = {"scope": "sample" if truncated else "complete_response", "well_formed": None if truncated else False,
                       "root": None, "namespace": None, "expected_namespace": False,
                       "loc_count": 0, "non_absolute_loc_count": 0}
+    if encoded_resource(item):
+        return {**evidence, "scope": "unsupported_encoding", "well_formed": None}
     parser = ElementTree.XMLPullParser(events=("start", "end"))
     try:
         parser.feed(str(item.get("body") or "").strip())
@@ -404,6 +414,8 @@ def sitemap_evidence(item: dict) -> dict:
 def resource_present(item: dict, filename: str, evidence: dict | None = None) -> tuple[bool, str]:
     if item.get("status") != "ok" or item.get("http_status") != 200:
         return False, item.get("reason", "not HTTP 200")
+    if encoded_resource(item):
+        return False, "encoded response is not decompressed by this audit"
     body = str(item.get("body") or "").strip()
     content_type = str(item.get("content_type") or "").lower()
     # Sitemap XML can contain comments or XHTML-prefixed child elements.
@@ -424,8 +436,8 @@ def resource_present(item: dict, filename: str, evidence: dict | None = None) ->
     return True, ""
 
 
-def indexing_evidence(parser: MetaParser, page: dict) -> dict:
-    evidence = [{"source": "meta", "value": item.get("content", "")} for item in parser.meta
+def indexing_evidence(parser: MetaParser | None, page: dict) -> dict:
+    evidence = [{"source": "meta", "value": item.get("content", "")} for item in (parser.meta if parser is not None else [])
                 if item.get("location") == "head" and item.get("name", "").lower() in {"robots", "googlebot"}]
     noindex = any(set(re.split(r"[\s,]+", item["value"].lower())) & {"noindex", "none"} for item in evidence)
     for header in page.get("x_robots_tag", []):
@@ -440,7 +452,7 @@ def indexing_evidence(parser: MetaParser, page: dict) -> dict:
             if scope in {"", "googlebot"} and set(part.strip().split()) & {"noindex", "none"}:
                 noindex = True
         evidence.append({"source": "x_robots_tag", "value": header})
-    return {"crawler": "Googlebot", "noindex": True if noindex else None if page.get("body_truncated") else False,
+    return {"crawler": "Googlebot", "noindex": True if noindex else None if parser is None or page.get("body_truncated") else False,
             "evidence": evidence, "scope": "observed_raw_response", "indexed": "unknown"}
 
 
@@ -486,24 +498,27 @@ def canonical_assessment(result: dict) -> dict:
             "scope": "html_links", "http_link_headers_need_review": headers_need_review}
 
 
-def assess(result: dict, parser: MetaParser, resources: dict) -> None:
+def assess(result: dict, parser: MetaParser | None, resources: dict | None) -> None:
     findings = result["findings"]
     def add(code: str, severity: str, message: str, evidence: str, confidence: str = "Confirmed") -> None:
         findings.append({"code": code, "severity": severity, "confidence": confidence, "message": message, "evidence": evidence})
     indexing = indexing_evidence(parser, result["page"])
+    result["assessment"] = {"indexing": indexing, "html_metadata_applicable": parser is not None}
+    if indexing["noindex"]:
+        add("noindex_declared", "error", "The observed response declares noindex for Googlebot; this does not measure current index state.", "assessment.indexing")
+    if parser is None:
+        return
     canonical = canonical_assessment(result)
     json_ld = result["json_ld"]
     parse_valid = all(item["status"] == "parsed" for item in json_ld) if json_ld else None
     if result["capture"]["body_truncated"]:
         parse_valid = None
         add("capture_incomplete", "warning", "HTML is truncated; absence and complete validation are unknown.", "capture")
-    result["assessment"] = {
+    result["assessment"].update({
         "crawl_access": resources["robots_access"], "indexing": indexing, "canonical": canonical,
         "json_ld_parse_valid": parse_valid,
         "observations": {"title_length": len(result["title"]), "description_length": len(result["meta_description"] or ""), "nonempty_h1_count": len(result["h1"])},
-    }
-    if indexing["noindex"]:
-        add("noindex_declared", "error", "The observed response declares noindex for Googlebot; this does not measure current index state.", "assessment.indexing")
+    })
     for agent, access in resources["robots_access"].items():
         if access["allowed"] is False:
             add("robots_disallow_" + agent.lower(), "error" if agent == "Googlebot" else "info", f"robots.txt disallows this URL for {agent}; this does not prove deindexing or actual network access.", "assessment.crawl_access." + agent)
@@ -539,6 +554,17 @@ def audit(url: str) -> dict:
     if page.get("status") != "ok":
         result["findings"].append({"code": "page_fetch_error", "severity": "error", "confidence": "Confirmed",
                                    "message": "Page fetch failed; metadata assessment is unavailable.", "evidence": "page"})
+        return result
+
+    media_type = str(page.get("content_type") or "").split(";", 1)[0].strip().lower()
+    encoded = encoded_resource(page)
+    if encoded or media_type not in {"text/html", "application/xhtml+xml"}:
+        reason = "unsupported_encoding" if encoded else "non_html" if media_type else "unknown_media_type"
+        result["capture"]["scope"] = "raw_response"
+        result["findings"].append({"code": "html_metadata_unavailable", "severity": "warning", "confidence": "Confirmed",
+                                   "message": f"HTML metadata checks were skipped ({reason}); no missing-metadata verdict is made.",
+                                   "evidence": "page"})
+        assess(result, None, None)
         return result
 
     parser = MetaParser()
