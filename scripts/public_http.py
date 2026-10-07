@@ -18,8 +18,12 @@ from html.parser import HTMLParser
 SocketAddress = tuple[str, int] | tuple[str, int, int, int]
 ResolvedEndpoint = tuple[int, int, int, str, SocketAddress]
 
-USER_AGENT = "github-repo-seo-skill/1.0"
+USER_AGENT = "seo-agent-suite/0.2.0 (+https://github.com/majiayu000/seo-agent-suite)"
+ROBOTS_UA_TOKEN = "seo-agent-suite"
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+# Politeness defaults for single-URL fetches (not a sitewide crawler).
+DEFAULT_MAX_BODY_BYTES = 1_000_000
+DEFAULT_TIMEOUT_SECONDS = 20
 
 
 def validate_public_http_url(url: str) -> tuple[urllib.parse.ParseResult, list[ResolvedEndpoint]]:
@@ -433,7 +437,7 @@ def request_via_proxy(
                     timeout=timeout,
                     tunnel_headers=auth_headers or None,
                 )
-            headers = {"User-Agent": USER_AGENT, "Host": host_header}
+            headers = default_request_headers(host=host_header)
 
             try:
                 connection.request("GET", path, headers=headers)
@@ -474,7 +478,7 @@ def request_public_url_once(url: str, timeout: int, *, max_body_bytes: int = 204
         connection_class = PinnedHTTPSConnection if parsed.scheme == "https" else PinnedHTTPConnection
         connection = connection_class(parsed.hostname, port, endpoint, timeout)
         try:
-            connection.request("GET", path, headers={"User-Agent": USER_AGENT})
+            connection.request("GET", path, headers=default_request_headers())
             response = connection.getresponse()
             body = _read_success_body(response, max_body_bytes)
             return {
@@ -565,7 +569,7 @@ def http_check(url: str, timeout: int = 15) -> dict:
     return {key: value for key, value in result.items() if key != "body"}
 
 
-def fetch_public_url(url: str, timeout: int = 20, *, max_body_bytes: int = 1_000_000) -> dict:
+def fetch_public_url(url: str, timeout: int = DEFAULT_TIMEOUT_SECONDS, *, max_body_bytes: int = DEFAULT_MAX_BODY_BYTES) -> dict:
     """Return audit-friendly fetch result with decoded body for successful responses."""
     # Read one extra byte to distinguish a bounded sample from a response at EOF.
     result = follow_public_http(url, timeout=timeout, max_body_bytes=max_body_bytes + 1)
@@ -596,3 +600,78 @@ def fetch_public_url(url: str, timeout: int = 20, *, max_body_bytes: int = 1_000
         "x_robots_tag": result["x_robots_tag"],
         "link_headers": result["link_headers"],
     }
+
+
+def robots_path_allowed(robots_body: str, path: str, *, user_agent: str = USER_AGENT) -> bool:
+    """Return whether robots.txt allows fetching path for our user-agent.
+
+    Implements a small, fail-open subset of the robots exclusion protocol:
+    empty/malformed input allows; longest matching Allow/Disallow for the
+    matching User-agent group wins. This is a safety helper for callers — it
+    does not turn public_http into a sitewide crawler.
+    """
+    if not robots_body or not path:
+        return True
+    if not path.startswith("/"):
+        path = "/" + path
+
+    token = (user_agent or USER_AGENT).split("/")[0].strip().lower() or ROBOTS_UA_TOKEN
+    groups: list[tuple[list[str], list[tuple[str, bool]]]] = []
+    current_uas: list[str] = []
+    current_rules: list[tuple[str, bool]] = []
+
+    def flush() -> None:
+        nonlocal current_uas, current_rules
+        if current_uas:
+            groups.append((current_uas, current_rules))
+        current_uas, current_rules = [], []
+
+    for raw in robots_body.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip().lower()
+        value = value.strip()
+        if key == "user-agent":
+            if current_rules:
+                flush()
+            current_uas.append(value.lower())
+        elif key in {"allow", "disallow"}:
+            if not current_uas:
+                current_uas = ["*"]
+            current_rules.append((value, key == "allow"))
+    flush()
+
+    matched_rules: list[tuple[str, bool]] | None = None
+    starred: list[tuple[str, bool]] | None = None
+    for uas, rules in groups:
+        if token in uas or any(token.startswith(ua) for ua in uas if ua != "*"):
+            matched_rules = rules
+            break
+        if "*" in uas:
+            starred = rules
+    rules = matched_rules if matched_rules is not None else (starred or [])
+    best: tuple[int, bool] | None = None  # (prefix_len, allowed)
+    for rule_path, allowed in rules:
+        if rule_path == "":
+            # Empty Disallow means allow all; empty Allow is ignored by common practice.
+            if not allowed:
+                candidate = (0, True)
+            else:
+                continue
+        elif path.startswith(rule_path):
+            candidate = (len(rule_path), allowed)
+        else:
+            continue
+        if best is None or candidate[0] > best[0]:
+            best = candidate
+    return True if best is None else best[1]
+
+
+def default_request_headers(*, host: str | None = None) -> dict[str, str]:
+    """Identifying UA for polite public fetches."""
+    headers = {"User-Agent": USER_AGENT, "Accept": "*/*"}
+    if host:
+        headers["Host"] = host
+    return headers

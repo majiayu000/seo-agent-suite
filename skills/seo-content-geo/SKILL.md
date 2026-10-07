@@ -1,11 +1,11 @@
 ---
 name: seo-content-geo
-description: Plan and review SEO content, keyword maps, content briefs, GEO/AEO readiness, offsite brand evidence, AI-search citation potential, FAQ/schema opportunities, and comparison/disambiguation pages. Use when Codex needs content strategy, long-tail page ideas, AI answer optimization, E-E-A-T/entity clarity, offsite brand/mention review, or launch/discoverability copy that should align with Shipwise positioning.
+description: Plan and review SEO content, keyword maps, content briefs, GEO/AEO readiness, offsite brand evidence, AI-search citation potential, FAQ/schema opportunities, and comparison/disambiguation pages. Use when an agent needs content strategy, long-tail page ideas, AI answer optimization, E-E-A-T/entity clarity, offsite brand/mention review, or launch/discoverability copy that should align with Shipwise positioning.
 ---
 
 # SEO Content GEO
 
-Create content and GEO/AEO recommendations with clear evidence boundaries. This skill plans content; it does not invent keyword volume, rankings, backlinks, or AI visibility.
+Create content and GEO/AEO recommendations with clear evidence boundaries. Shipwise project records are optional context when present. This skill plans content; it does not invent keyword volume, rankings, backlinks, or AI visibility.
 
 ## Workflow
 

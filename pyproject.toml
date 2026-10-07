@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "seo-agent-suite"
+version = "0.2.0"
+description = "Evidence-backed SEO and discoverability audits for agents (CLI + optional MCP)."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "majiayu000", email = "1835304752@qq.com" }]
+keywords = ["seo", "agent", "mcp", "discoverability", "technical-seo"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Internet :: WWW/HTTP :: Site Management",
+]
+dependencies = []
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.0"]
+
+[project.urls]
+Homepage = "https://github.com/majiayu000/seo-agent-suite"
+Repository = "https://github.com/majiayu000/seo-agent-suite"
+Issues = "https://github.com/majiayu000/seo-agent-suite/issues"
+
+[project.scripts]
+seo-agent = "seo_agent_suite.cli:main"
+
+[tool.setuptools]
+packages = ["seo_agent_suite", "seo_agent_suite.collectors"]
+
+[tool.setuptools.package-dir]
+seo_agent_suite = "src/seo_agent_suite"
+"seo_agent_suite.collectors" = "scripts"
+
+[tool.setuptools.package-data]
+seo_agent_suite = ["py.typed"]

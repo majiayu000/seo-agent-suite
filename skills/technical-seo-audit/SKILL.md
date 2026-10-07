@@ -1,6 +1,6 @@
 ---
 name: technical-seo-audit
-description: Run evidence-backed technical SEO audits for websites, docs sites, landing pages, and GitHub Pages properties. Use when Codex needs to inspect crawlability, title/meta/canonical tags, robots.txt, sitemap.xml, Open Graph/Twitter metadata, JSON-LD/schema, status codes, redirect/canonical issues, internal links, JavaScript rendering risk, Core Web Vitals boundaries, or technical SEO issues for a site.
+description: Run evidence-backed technical SEO audits for websites, docs sites, landing pages, and GitHub Pages properties. Use when an agent needs to inspect crawlability, title/meta/canonical tags, robots.txt, sitemap.xml, Open Graph/Twitter metadata, JSON-LD/schema, status codes, redirect/canonical issues, internal links, JavaScript rendering risk, Core Web Vitals boundaries, or technical SEO issues for a site.
 ---
 
 # Technical SEO Audit
@@ -10,12 +10,14 @@ Audit crawlability and page-level technical SEO. Prefer deterministic evidence b
 ## Workflow
 
 1. Identify the target URL and scope: single page, docs site, sitemap URLs, or selected landing pages. Record collection time, URL set, exclusions, and available site ownership/access.
-2. Run the local page audit first from the SEO Agent Suite repository or
-   installed plugin root:
+2. Run the local page audit first via CLI (preferred) or legacy script:
 
 ```bash
-python3 scripts/site_meta_audit.py <url> --json
+seo-agent site-meta <url> --json
+# legacy: python3 scripts/site_meta_audit.py <url> --json
 ```
+
+Read `findings[]` (Confirmed/Likely/Hypothesis via `confidence`) before drafting issues.
 
 3. For repository-backed sites, also run `github-repo-seo` baseline collection.
 4. For multi-page or JavaScript-rendered sites, read `references/data-sources.md` and choose Firecrawl, Playwright, or Lighthouse based on the proof needed and authorized access path. An audit does not authorize desktop UI operation or authenticated submissions.

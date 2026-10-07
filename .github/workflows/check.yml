@@ -23,6 +23,9 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
+      - name: Install package
+        run: python3 -m pip install -e .
+
       - name: Compile scripts
         run: python3 -m py_compile scripts/*.py
 

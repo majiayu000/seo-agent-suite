@@ -3,65 +3,81 @@
 [![Check](https://github.com/majiayu000/seo-agent-suite/actions/workflows/check.yml/badge.svg)](https://github.com/majiayu000/seo-agent-suite/actions/workflows/check.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Codex plugin for evidence-backed SEO and discoverability audits.
+Evidence-backed SEO and discoverability audits for **agents** — Codex skills, Cursor / Claude Code workflows, a `seo-agent` CLI, and an optional MCP server.
 
-This repository is the execution layer for Shipwise-style discoverability work. [Shipwise](https://majiayu000.github.io/shipwise/) remains the launch/discoverability planning system; this plugin provides reusable skills and scripts that collect evidence and turn it into repo, package, site, and content SEO actions.
+This repository is the execution layer for Shipwise-style discoverability work. [Shipwise](https://majiayu000.github.io/shipwise/) remains an **optional** launch/discoverability planning adapter; this suite collects public-surface evidence and turns it into repo, package, site, and content SEO actions. It does **not** auto-publish, mutate remote sites, or claim rankings from a crawl alone.
 
 ## Relationship To Shipwise
 
 ```text
-shipwise
+shipwise (optional adapter)
 ├── docs/DISCOVERABILITY.md
 ├── templates/seo/keyword_map.md
 └── projects/<project>/
 
-seo-agent-suite
-├── .codex-plugin/plugin.json
+seo-agent-suite (this repo)
+├── seo-agent CLI / optional MCP
 ├── skills/
 ├── scripts/
 └── references/
 ```
 
-Use Shipwise to decide launch strategy, platform fit, messaging, and project records. Use SEO Agent Suite to run audits, collect public-surface evidence, and generate SEO issues or reports.
+Use Shipwise when you already keep launch strategy there. Use SEO Agent Suite alone when you only need audits and evidence.
 
 ## Quick Start
 
-Clone the repository to run the local audits with Python 3.11 or newer:
+Requires Python 3.11+.
 
 ```bash
 git clone https://github.com/majiayu000/seo-agent-suite.git
 cd seo-agent-suite
+pip install -e .
+seo-agent doctor
+seo-agent repo-baseline --root . --json
+seo-agent site-meta https://example.com/ --json
 ```
 
-Run the local validation checks:
+Legacy script paths still work from the suite root (agents do not need to `cd scripts/`):
 
 ```bash
-python3 -m py_compile scripts/*.py
-python3 tests/test_structure.py
-python3 -m unittest discover -s tests -p 'test_*.py'
-```
-
-Run a repository baseline audit:
-
-```bash
-python3 scripts/repo_seo_baseline.py --root . --json
-```
-
-Run the same audit with a Shipwise project record:
-
-```bash
-python3 scripts/repo_seo_baseline.py --root /path/to/repo --project-yaml /path/to/project.yaml --json
-```
-
-Run a basic public-page metadata audit:
-
-```bash
+python3 scripts/repo_seo_baseline.py --root /path/to/target-repo --json
 python3 scripts/site_meta_audit.py https://example.com/ --json
 ```
 
-The plugin manifest lives at [.codex-plugin/plugin.json](.codex-plugin/plugin.json).
-Skills live under [skills/](skills/), and reference material lives under
-[references/](references/).
+### Report Envelope
+
+CLI JSON output includes a stable envelope **in addition to** legacy evidence fields:
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | Envelope schema (`1.0`) |
+| `tool_version` | Package version (`0.2.0`) |
+| `target` | `{kind: repo\|site, id: ...}` |
+| `status` | `ok` / `partial` / `error` |
+| `findings[]` | Agent-facing list with `id`, `severity`, `confidence`, `surface`, `status`, `detail`, `evidence`, optional `action` |
+
+Prefer `findings[]` for reports. Keep reading nested evidence when you need raw proof.
+
+### Exit codes
+
+| Command | Exit `0` | Exit `1` |
+| --- | --- | --- |
+| `seo-agent repo-baseline` / `repo_seo_baseline.py` | No structured `errors[]` | Manifest / site-resource / Shipwise collection errors |
+| `seo-agent site-meta` / `site_meta_audit.py` | Page fetch succeeded | Page fetch failed (meta gaps still exit `0`, surfaced as findings) |
+| `seo-agent doctor` | Scripts present | Suite scripts missing |
+
+`status: ok` is **not** a ranking or launch-readiness verdict.
+
+### Optional MCP
+
+```bash
+pip install -e '.[mcp]'
+seo-agent mcp
+```
+
+Tools: `doctor`, `repo_baseline`, `site_meta`. No paid SEO APIs are embedded.
+
+Configure your MCP client with the `seo-agent mcp` stdio command after the extra is installed.
 
 ## Load the skills in Codex
 
@@ -120,18 +136,18 @@ sitemap validation remain unknown.
 
 | Task | Start here | What to inspect |
 | --- | --- | --- |
-| Review a repository before launch | `repo_seo_baseline.py --root /absolute/repo/path --json` | `readmes`, `community_files`, manifests and collected GitHub metadata |
-| Check a Shipwise launch record | Add `--project-yaml /absolute/path/project.yaml` | `shipwise.checks`, `errors` and the record's proof fields |
-| Check a public page | `site_meta_audit.py https://your-public-site.example/ --json` | `checks`, canonical, title, description and crawl-resource responses |
+| Review a repository before launch | `seo-agent repo-baseline --root /absolute/repo/path --json` | `findings`, `readmes`, `community_files`, manifests and collected GitHub metadata |
+| Check a Shipwise launch record (optional) | Add `--project-yaml /absolute/path/project.yaml` | `shipwise.checks`, `errors` and the record's proof fields |
+| Check a public page | `seo-agent site-meta https://your-public-site.example/ --json` | `findings`, `checks`, canonical, title, description and crawl-resource responses |
 | Decide what content to write | [seo-content-geo](skills/seo-content-geo/SKILL.md) | Task intent, current source evidence, target page and unanswered questions |
 | Establish demand or indexing | [seo-data-sources](skills/seo-data-sources/SKILL.md) | Authorized provider access and the claim each source can support |
 
-Run the scripts from this repository's checkout, even when `--root` points to
-another project. Save a report outside the audited repository if you want to
-keep its working tree unchanged:
+`seo-agent` locates the suite root automatically. Legacy scripts should still be
+run from this repository's checkout (or via `pip install -e .`). Save a report
+outside the audited repository if you want to keep its working tree unchanged:
 
 ```bash
-python3 scripts/repo_seo_baseline.py --root /absolute/repo/path --json > /absolute/report/path/repo-baseline.json
+seo-agent repo-baseline --root /absolute/repo/path --json > /absolute/report/path/repo-baseline.json
 ```
 
 For the repository audit, `status: error` and exit code **1** mean a collected
@@ -235,14 +251,17 @@ to connect those findings to the launch record and
 - [seo-content-geo](skills/seo-content-geo/SKILL.md): Keyword mapping, content briefs, GEO/AEO readiness, and AI citation-oriented content review.
 - [seo-data-sources](skills/seo-data-sources/SKILL.md): Provider selection and evidence boundaries for local scripts, Firecrawl, Google Search Console, PageSpeed/CrUX, DataForSEO, SE Ranking, and Ahrefs.
 
-## Scripts
+## CLI and scripts
 
 ```bash
+seo-agent repo-baseline --root . --json
+seo-agent site-meta https://example.com/ --json
+# equivalent legacy entrypoints:
 python3 scripts/repo_seo_baseline.py --root . --json
 python3 scripts/site_meta_audit.py https://example.com/ --json
 ```
 
-The scripts are local dry-audit tools. They do not require API keys and should not be used to claim keyword volume, ranking, backlink gaps, or Search Console indexing status.
+These are local dry-audit tools. They do not require API keys and should not be used to claim keyword volume, ranking, backlink gaps, or Search Console indexing status.
 
 ## Open Graph report compatibility
 
@@ -277,6 +296,7 @@ See the [acceptance status](references/acceptance-status.md) for completed
 plugin, browser and public-site checks, and the remaining account-data blockers.
 
 ```bash
+pip install -e .
 python3 -m py_compile scripts/*.py
 python3 tests/test_structure.py
 python3 -m unittest discover -s tests -p 'test_*.py'
@@ -291,8 +311,9 @@ See [CHANGELOG.md](CHANGELOG.md).
 - Do not store API keys, cookies, Search Console credentials, or provider tokens in this repository.
 - Do not claim Google indexing or rankings from a successful crawl alone.
 - Do not present optional MCP providers as installed unless the current environment proves it.
-- Do not automate posting or publishing. This plugin audits and prepares evidence; publishing still requires explicit user instruction.
-- The declared `Write` capability is for local report and issue-draft files only, never for remote publishing.
+- Do not automate posting or publishing. This suite audits and prepares evidence; publishing still requires explicit user instruction.
+- The declared Codex `Write` capability is for local report and issue-draft files only, never for remote publishing.
+- This release does not ship a sitewide crawler core; single-URL public fetches stay fail-closed and polite.
 
 ## Support and license
 

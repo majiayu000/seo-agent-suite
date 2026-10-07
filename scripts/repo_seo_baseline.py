@@ -713,6 +713,18 @@ def crate_registry_check(name: str, local_version: object = None) -> dict:
     return result
 
 
+def _enrich_repo_evidence(evidence: dict) -> dict:
+    """Attach Report Envelope fields; works from checkout without install."""
+    try:
+        from seo_agent_suite.report import enrich_repo_evidence
+    except ImportError:
+        src = Path(__file__).resolve().parents[1] / "src"
+        if str(src) not in sys.path:
+            sys.path.insert(0, str(src))
+        from seo_agent_suite.report import enrich_repo_evidence
+    return enrich_repo_evidence(evidence)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Collect repo/package SEO baseline evidence.")
     parser.add_argument("--root", default=".", help="Repository root to inspect.")
@@ -720,7 +732,7 @@ def main() -> int:
     parser.add_argument("--npm", action="append", default=[], help="npm package name to verify. Can be repeated.")
     parser.add_argument("--crate", action="append", default=[], help="crates.io package name to verify. Can be repeated.")
     parser.add_argument("--project-yaml", help="Shipwise project.yaml to validate against discoverability checks.")
-    parser.add_argument("--json", action="store_true", help="Emit JSON output.")
+    parser.add_argument("--json", action="store_true", help="Emit JSON Report Envelope.")
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
@@ -810,6 +822,7 @@ def main() -> int:
     errors = collect_errors(evidence)
     evidence["status"] = "error" if errors else "ok"
     evidence["errors"] = errors
+    evidence = _enrich_repo_evidence(evidence)
 
     if args.json:
         print(json.dumps(evidence, indent=2, sort_keys=True))
@@ -819,11 +832,12 @@ def main() -> int:
         print(f"crates: {', '.join(crate_names) or 'none'}")
         print(f"homepages: {', '.join(site) or 'none'}")
         sys.stdout.write(f"status: {evidence['status']}\n")
+        sys.stdout.write(f"findings: {len(evidence.get('findings') or [])}\n")
         if errors:
             sys.stdout.write("errors:\n")
             for item in errors:
                 sys.stdout.write(f"- {item.get('surface')}: {item.get('reason')}\n")
-        print("Run with --json for full evidence.")
+        print("Run with --json for full evidence + findings.")
 
     return 1 if errors else 0
 
