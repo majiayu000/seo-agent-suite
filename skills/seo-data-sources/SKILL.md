@@ -21,11 +21,18 @@ Use this skill before relying on external SEO data. Read `references/data-source
 - Local scripts: repo/package/site metadata and crawlability baseline.
 - Firecrawl: rendered crawl and competitor page extraction.
 - Google Search Console: owned-property query/performance evidence and indexed-version inspection; sitemap submission only when that action is authorized.
-- PageSpeed/CrUX: lab and field performance evidence.
+- PageSpeed/CrUX: public lab and available field performance evidence, without a site-ownership prerequisite; API keys, quotas and field availability are separate checks.
 - DataForSEO: keyword, SERP, and competitor data via API.
 - SE Ranking: packaged SEO/GEO workflows and share-of-voice style reporting.
 - Backlinks: existing authorized Search Console Links exports for owned-site samples, or available DataForSEO/Ahrefs tools for their index and competitor scope.
-- AI visibility: authorized Bing Webmaster Tools citation reports for supported surfaces, or provider-defined prompt samples; document what the metric measures.
+- AI visibility: authorized GSC generative-AI impressions, Bing citation reports, or provider-defined prompt samples; follow the dated source boundaries in `references/data-sources.md`. GA4 AI-attributed sessions measure visits separately.
+
+## Source-Selection Examples
+
+These are decision records, not live audits; apply the dated official guidance in `references/data-sources.md`.
+
+- Public, non-owned URL; no Search Console property: choose available PageSpeed/public CrUX evidence for performance. Do not request ownership verification for those sources. Record lab/field, requested/observed URL or origin, device, window and missing field data; CrUX API configuration/quota can still block that route.
+- Property-specific search queries or indexed-version evidence: require explicit authorized Search Console property access. A public PageSpeed result or Google API key does not supply that access; without it, retain the blocker and continue independent public checks.
 
 ## Output
 
