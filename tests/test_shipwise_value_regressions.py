@@ -34,6 +34,28 @@ class ShipwiseValueTests(unittest.TestCase):
         self.assertEqual(result["checks"]["keywords"]["status"], "ok")
         self.assertEqual(result["checks"]["keywords"]["evidence"], ["  synthetic term  ", "second"])
 
+    def test_repetition_is_an_observation_with_explicit_unicode_matching_basis(self):
+        cases = [("Go", "Django and Google", 2), ("Straße", "STRASSE, Straße!", 2),
+                 ("repo seo", "repo seo; (repo seo)", 2), ("中文", "中文工具，中文文档", 2)]
+        for keyword, description, count in cases:
+            with self.subTest(keyword=keyword), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                project = root / "project.yaml"
+                project.write_text("discoverability:\n  primary_keyword: " + json.dumps(keyword, ensure_ascii=False) +
+                                   "\n  description: " + json.dumps(description, ensure_ascii=False) + "\n")
+                result = repo.evaluate_shipwise_project(root, project)
+                self.assertNotIn("keyword_stuffing", result["checks"])
+                self.assertEqual(result["keyword_observations"]["primary_keyword_occurrences"], count)
+                self.assertEqual(result["keyword_observations"]["matching_basis"], "casefolded_substring")
+                self.assertEqual(result["checks"]["primary_keyword_in_description"]["status"], "ok")
+                # Existing missing-input gates still produce structured errors.
+                self.assertEqual(result["checks"]["keywords"]["status"], "error")
+
+    def test_missing_keyword_has_zero_observations_and_keeps_required_gate(self):
+        result = self.evaluate(["valid"])
+        self.assertEqual(result["keyword_observations"]["primary_keyword_occurrences"], 0)
+        self.assertEqual(result["checks"]["primary_keyword"]["status"], "error")
+
     def test_duplicate_unhashable_topics_emit_json_errors_instead_of_crashing(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

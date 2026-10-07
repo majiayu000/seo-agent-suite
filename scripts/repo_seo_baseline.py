@@ -511,11 +511,9 @@ def evaluate_shipwise_project(root: Path, project_yaml: Path) -> dict:
         index for index, item in enumerate(keywords)
         if not isinstance(item, str) or not item.strip()
     ]
-    repeated_primary = (
-        description.lower().count(primary_keyword.lower()) > 1 if primary_keyword and description else False
-    )
+    primary_occurrences = description.casefold().count(primary_keyword.casefold()) if primary_keyword and description else 0
     primary_in_description = bool(
-        primary_keyword and description and primary_keyword.casefold() in description.casefold()
+        primary_occurrences
     )
 
     checks = {
@@ -545,7 +543,6 @@ def evaluate_shipwise_project(root: Path, project_yaml: Path) -> dict:
             discoverability.get("social_image_set"),
             "social preview image is not marked as set",
         ),
-        "keyword_stuffing": check_item(not repeated_primary, description, "primary keyword repeated too often in description"),
         "readme": check_item(community_files["readme"], community_files["readme"], "README missing"),
         "license": check_item(community_files["license"], community_files["license"], "LICENSE missing"),
         "contributing": check_item(
@@ -571,6 +568,11 @@ def evaluate_shipwise_project(root: Path, project_yaml: Path) -> dict:
         "project_yaml": str(project_yaml),
         "discoverability": discoverability,
         "community_files": community_files,
+        "keyword_observations": {
+            "primary_keyword_occurrences": primary_occurrences,
+            "matching_basis": "casefolded_substring",
+            "interpretation": "Includes word fragments; repetition alone does not establish keyword stuffing.",
+        },
         "checks": checks,
     }
 
