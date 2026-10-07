@@ -14,7 +14,12 @@ NODE_PATH="$acceptance_tools/node_modules" node tests/browser_acceptance.cjs \
   "$acceptance_tools/artifacts" "$acceptance_tools/fixture.webm"
 ```
 
-The script exits nonzero on failed fixture assertions, failed public page loads, or missing expected public content. Network access is required. It saves response HTML, rendered HTML and `acceptance.json` in the artifact directory; keep these out of commits. The fixture deliberately contains missing mobile content and an absent hreflang return link to verify that these defects are detected.
+Add `--fixtures-only` after the WebM path to skip all public URL captures.
+This is the CI mode: the six controlled checks run against the isolated local
+server and `public` is empty in the report. Installing prerequisites still needs
+network access; fixture execution does not depend on public websites.
+
+The script exits nonzero on failed fixture assertions, failed public page loads, or missing expected public content. The default mode requires network access. It saves response HTML, rendered HTML and `acceptance.json` in the artifact directory; keep these out of commits. The fixture deliberately contains missing mobile content and an absent hreflang return link to verify that these defects are detected.
 
 ## Completed run: 2026-10-05
 

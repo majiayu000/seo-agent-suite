@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Classify sitemap XML by root/namespace and keep dormant templates, SVG titles
+  and script/style source out of raw document metadata; recognize omitted heads.
+- Preserve homepage path slashes, validate restricted Shipwise input structure
+  and array members, and return structured errors for manifest numeric limits.
+- Retain ordered Open Graph declarations and keep the first image's attributes
+  together instead of combining fields from different images.
+- Preserve HTTP redirect/error status without reading irrelevant bodies and
+  reject premature EOF in Content-Length responses.
+- Scope HTML findings to supported media types and unencoded responses;
+  retain applicable noindex headers and mark compressed crawl resources unknown.
+- Report Unicode-aware keyword substring counts as observations rather than
+  automatically failing launch checks for keyword stuffing.
+- Test Python 3.11/3.12 in CI and run controlled browser fixtures independently
+  of public-site availability with `--fixtures-only`.
+
 - Add evidence-backed page findings and opt-in `--fail-on` severity gates while
   preserving default fetch exit codes. Evaluate per-crawler robots permissions,
   scoped noindex directives, HTML canonical declarations and JSON-LD parsing;
