@@ -43,12 +43,18 @@ def run_cmd(args: list[str], cwd: Path | None = None, timeout: int = 20) -> dict
             args,
             cwd=str(cwd) if cwd else None,
             text=True,
+            encoding="utf-8",
+            errors="strict",
             capture_output=True,
             timeout=timeout,
             check=False,
         )
     except subprocess.TimeoutExpired:
         return {"status": "error", "reason": "timeout", "command": args}
+    except UnicodeDecodeError:
+        return {"status": "error", "reason": "decode_error", "command": args}
+    except OSError:
+        return {"status": "error", "reason": "execution_error", "command": args}
 
     return {
         "status": "ok" if result.returncode == 0 else "error",
