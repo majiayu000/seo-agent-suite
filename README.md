@@ -146,6 +146,11 @@ A non-zero exit reports a page-fetch failure, invalid input, or an explicitly
 selected findings threshold. Inspect the JSON
 rather than treating either script's exit code as a search-performance score.
 
+Shipwise keyword repetition is an observation in `keyword_observations`, not a
+keyword-stuffing verdict or launch gate. Counts use casefolded substring matching
+(including word fragments and Unicode case folding); the same basis is used for
+the Shipwise primary-keyword presence requirement. Review copy quality in context.
+
 To use page findings as an optional CI gate:
 
 ```bash
