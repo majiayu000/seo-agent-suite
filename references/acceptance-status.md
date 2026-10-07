@@ -18,10 +18,10 @@ possible SEO problem has been eliminated.
 
 ## Local reliability follow-up: 2026-10-07
 
-**Confirmed:** the combined reliability changes passed all 179 Python tests on
+**Confirmed:** the combined reliability changes passed all 182 Python tests on
 Python 3.11 and 3.12, plus script compilation and plugin structure validation.
 The offline regressions cover sitemap identity, metadata context, Open Graph
-ordering, Shipwise input/keyword observations, and HTTP response boundaries.
+image/audio/video ordering, Shipwise input/keyword observations, and HTTP response boundaries.
 HTML checks explicitly distinguish unsupported media/codings from missing or
 invalid metadata; applicable response-header noindex remains assessed.
 

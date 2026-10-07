@@ -247,25 +247,25 @@ The scripts are local dry-audit tools. They do not require API keys and should n
 ## Open Graph report compatibility
 
 `open_graph` remains a flat string-valued compatibility summary, not a complete
-media representation. Repeated images now select the **first** `og:image` (or
-its `og:image:url` alias), following the [Open Graph array preference](https://ogp.me/#array),
-instead of the previous last-image selection. Only that root's following
-`og:image:*` properties enter the summary, stopping at the next top-level OG
-root or media URL alias. Repeated image properties also keep their first value.
-Blank or missing content stays an empty string; no preferred image or dimensions
+media representation. Each image, audio and video summary selects its **first** media root (including
+the corresponding `:url` alias), following the [Open Graph array preference](https://ogp.me/#array),
+instead of the previous last-media selection. Only that root's following
+matching media properties enter the summary, stopping at the next top-level OG
+root or media URL alias. Repeated media properties also keep their first value.
+Blank or missing content stays an empty string; no preferred media or dimensions
 are inferred from a later declaration. The selected root keeps its written key,
 so an `og:image:url` declaration does not invent an `og:image` declaration.
 
 For example, `first.png`, width `100`, then `second.png` now summarizes
 `{"og:image": "first.png", "og:image:width": "100"}`. If the width is declared
 only after `second.png`, it does not appear in the first image's summary.
-An ordinary single-image group retains its supplied fields. Non-image OG and
+An ordinary single-media group retains its supplied fields. Non-media OG and
 Twitter duplicate selection remains last-value; OG URL userinfo is redacted.
 
 Use `open_graph_declarations` for ordered evidence. Each entry has `property`,
 `content`, and `location` (`head`, `body`, or `outside_head_body`), with duplicates,
-orphan properties, and blank content retained. An orphan image property appears
-only here, never attached to another image in the summary. The array is empty
+orphan properties, and blank content retained. An orphan media property appears
+only here, never attached to another image, audio or video in the summary. The array is empty
 when no matching OG declarations exist, and it shares the report's raw-HTML
 capture/truncation limits. URL credentials are removed using the existing
 userinfo-redaction policy; unrelated HTML attributes are not copied. These
