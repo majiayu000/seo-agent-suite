@@ -130,6 +130,38 @@ class OpenGraphRegressionTests(unittest.TestCase):
         self.assertEqual(result["open_graph"], {})
         self.assertEqual(result["open_graph_declarations"][0]["content"], "100")
 
+    def test_audio_video_keep_first_media_and_its_own_properties(self):
+        for media in ("audio", "video"):
+            for first, second in ((f"og:{media}", f"og:{media}:url"), (f"og:{media}:url", f"og:{media}")):
+                with self.subTest(media=media, first=first):
+                    result = self.audit_html(f'<meta property="{first}" content="first">'
+                                             f'<meta property="og:{media}:type" content="first/type">'
+                                             f'<meta property="{second}" content="second">'
+                                             f'<meta property="og:{media}:secure_url" content="later">')
+                    self.assertEqual(result["open_graph"], {first: "first", f"og:{media}:type": "first/type"})
+                    self.assertEqual(len(result["open_graph_declarations"]), 4)
+
+    def test_audio_video_orphans_and_interleaved_properties_stay_only_as_evidence(self):
+        result = self.audit_html('''<meta property="og:audio:type" content="orphan">
+            <meta property="og:video" content="video"><meta property="og:video:width" content="100">
+            <meta property="og:audio" content="audio"><meta property="og:audio:type" content="audio/mpeg">
+            <meta property="og:video:height" content="200"><meta property="og:title" content="Title">
+            <meta property="og:audio:secure_url" content="detached">''')
+        self.assertEqual(result["open_graph"], {"og:video": "video", "og:video:width": "100",
+                                               "og:audio": "audio", "og:audio:type": "audio/mpeg", "og:title": "Title"})
+        self.assertEqual(len(result["open_graph_declarations"]), 8)
+
+    def test_audio_video_blank_first_values_and_equal_urls_do_not_merge_groups(self):
+        for media in ("audio", "video"):
+            for root in ("", "same"):
+                with self.subTest(media=media, root=root):
+                    result = self.audit_html(f'<meta property="og:{media}" content="{root}">'
+                                             f'<meta property="og:{media}:type" content="">'
+                                             f'<meta property="og:{media}:type" content="duplicate">'
+                                             f'<meta property="og:{media}" content="{root}">'
+                                             f'<meta property="og:{media}:secure_url" content="second">')
+                    self.assertEqual(result["open_graph"], {f"og:{media}": root, f"og:{media}:type": ""})
+
     def test_new_evidence_and_summary_redact_url_userinfo(self):
         result = self.audit_html('''<meta property="og:image" content="https://user:secret@example.invalid/first.png" data-debug="private">
             <meta property="og:image:secure_url" content="https://user:secret@example.invalid/secure.png">

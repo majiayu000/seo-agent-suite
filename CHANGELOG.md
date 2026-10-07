@@ -7,7 +7,8 @@
 - Preserve homepage path slashes, validate restricted Shipwise input structure
   and array members, and return structured errors for manifest numeric limits.
 - Retain ordered Open Graph declarations and keep the first image's attributes
-  together instead of combining fields from different images.
+  together instead of combining fields from different images. Apply the same
+  first-root ownership to audio and video summaries.
 - Preserve HTTP redirect/error status without reading irrelevant bodies and
   reject premature EOF in Content-Length responses.
 - Scope HTML findings to supported media types and unencoded responses;

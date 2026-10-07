@@ -177,14 +177,14 @@ def all_meta_prefix(parser: MetaParser, key: str, prefix: str) -> dict[str, str]
 def open_graph_evidence(parser: MetaParser) -> tuple[dict[str, str], list[dict[str, str]]]:
     """Return a compatibility summary and sanitized, ordered OG declarations.
 
-    The first image root (including its :url alias) owns only the image
+    The first root of each media kind (including :url aliases) owns only its
     properties before the next OG root. Other OG fields retain last-value
     summary behavior; the declarations, not the summary, preserve all evidence.
     """
     summary: dict[str, str] = {}
     declarations: list[dict[str, str]] = []
-    found_image = False
-    in_first_image = False
+    seen_media: set[str] = set()
+    active_media: str | None = None
     for item in parser.meta:
         name = item.get("property", "")
         if not name.startswith("og:"):
@@ -196,19 +196,21 @@ def open_graph_evidence(parser: MetaParser) -> tuple[dict[str, str], list[dict[s
                          redact_url(item.get("content", "")))
         declarations.append({"property": name, "content": content,
                              "location": item.get("location", "outside_head_body")})
-        if name in {"og:image", "og:image:url"}:
-            in_first_image = not found_image
-            found_image = True
-            if in_first_image:
+        parts = name.split(":")
+        media = parts[1] if parts[1] in {"image", "video", "audio"} else None
+        if media and (len(parts) == 2 or parts[2:] == ["url"]):
+            active_media = media if media not in seen_media else None
+            seen_media.add(media)
+            if active_media:
                 summary[name] = content
-        elif name.startswith("og:image:"):
-            if in_first_image:
+        elif media:
+            if active_media == media:
                 # First declaration wins even when its content is blank.
                 summary.setdefault(name, content)
         else:
             summary[name] = content
-            if name.count(":") == 1 or name in {"og:video:url", "og:audio:url"}:
-                in_first_image = False
+            if len(parts) == 2:
+                active_media = None
     return summary, declarations
 
 
