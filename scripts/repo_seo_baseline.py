@@ -191,6 +191,23 @@ def registry_name_error(name: object, registry: str, path: str) -> dict | None:
     return {"status": "error", "path": path, "reason": f"invalid {registry} package name"}
 
 
+def validate_toml_evidence(manifest: dict, table: str, errors: list[dict]) -> None:
+    """Reject unsupported exported values without discarding valid sibling fields."""
+    for field, value in list(manifest.items()):
+        try:
+            json.dumps(value, allow_nan=False)
+        except (TypeError, ValueError, RecursionError) as exc:
+            detail = (
+                "contains a TOML date/time value" if isinstance(exc, TypeError)
+                else "contains a non-finite number" if isinstance(exc, ValueError)
+                else "exceeds supported nesting limits"
+            )
+            reason = f"{table}.{field} {detail}"
+            errors.append({"status": "error", "path": manifest["path"], "reason": reason})
+            manifest[field] = None
+            manifest.update({"status": "error", "reason": reason})
+
+
 def collect_manifests(root: Path) -> dict:
     manifests: dict[str, object] = {"npm": [], "cargo": None, "python": None, "errors": []}
 
@@ -250,6 +267,7 @@ def collect_manifests(root: Path) -> dict:
             if name_error:
                 manifests["errors"].append(name_error)
                 manifests["cargo"].update({"status": "error", "reason": name_error["reason"]})
+            validate_toml_evidence(manifests["cargo"], "package", manifests["errors"])
 
     workspace = cargo_data.get("workspace") if cargo_data else None
     if isinstance(workspace, dict) and (workspace.get("members") or cargo_data.get("package")):
@@ -301,6 +319,7 @@ def collect_manifests(root: Path) -> dict:
                 "urls": project.get("urls"),
                 "keywords": project.get("keywords"),
             }
+            validate_toml_evidence(manifests["python"], "project", manifests["errors"])
 
     return manifests
 
