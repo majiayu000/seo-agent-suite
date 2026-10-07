@@ -55,6 +55,25 @@ class MetadataContextTests(unittest.TestCase):
         self.assertEqual(parser.json_ld_count, 1)
         self.assertEqual(parser.json_ld[0]["types"], ["Thing"])
 
+    def test_omitted_head_preserves_directives_base_and_canonical(self):
+        parser = self.parse('<!doctype html><html><title>Actual</title>'
+                            '<base href="https://example.invalid/docs/">'
+                            '<meta name="robots" content="noindex">'
+                            '<link rel="canonical" href="page"><h1>Main</h1>'
+                            '<meta name="robots" content="index"></html>')
+        self.assertEqual(parser.title, "Actual")
+        self.assertEqual([item["location"] for item in parser.meta], ["head", "body"])
+        self.assertTrue(site.indexing_evidence(parser, {})["noindex"])
+        self.assertEqual(site.link_evidence(parser, "https://example.invalid/", "canonical")[0]["resolved_url"],
+                         "https://example.invalid/docs/page")
+
+    def test_body_content_ends_implicit_head(self):
+        for start in ('<body>', '<div>Content</div>', 'Plain text'):
+            with self.subTest(start=start):
+                parser = self.parse(start + '<meta name="robots" content="noindex">')
+                self.assertEqual(parser.meta[0]["location"], "body")
+                self.assertFalse(site.indexing_evidence(parser, {})["noindex"])
+
     def test_inert_fragment_does_not_make_audit_presence_checks_true(self):
         url = "https://example.invalid/"
         page = {"status": "ok", "url": url, "http_status": 200,
