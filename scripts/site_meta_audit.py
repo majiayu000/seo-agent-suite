@@ -549,7 +549,8 @@ def assess(result: dict, parser: MetaParser | None, resources: dict | None) -> N
     elif any(item["status"] == "incomplete_script" for item in json_ld):
         add("json_ld_incomplete", "warning", "An unfinished JSON-LD script cannot be validated.", "json_ld")
     for key in ("title", "meta_description"):
-        if not result[key] and not result["capture"]["body_truncated"]:
+        present = bool((result[key] or "").strip()) if key == "meta_description" else bool(result[key])
+        if not present and not result["capture"]["body_truncated"]:
             add(key + "_missing", "warning", f"No nonempty {key} was observed.", key)
     if len(result["h1"]) != 1:
         add("h1_review", "info", "Review the observed heading hierarchy in context; H1 count alone is not an indexing failure.", "h1", "Likely")
@@ -602,7 +603,7 @@ def audit(url: str) -> dict:
             "h1": parser.h1,
             "checks": {
                 "has_title": bool(" ".join(parser.title.split())),
-                "has_meta_description": bool(first_meta(parser, "name", "description")),
+                "has_meta_description": bool((first_meta(parser, "name", "description") or "").strip()),
                 "has_canonical": bool(first_link(parser, "canonical")),
                 "has_og_title": bool(open_graph.get("og:title")),
                 "has_json_ld": parser.json_ld_count > 0,
