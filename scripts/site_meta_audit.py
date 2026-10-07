@@ -166,6 +166,44 @@ def all_meta_prefix(parser: MetaParser, key: str, prefix: str) -> dict[str, str]
     return output
 
 
+def open_graph_evidence(parser: MetaParser) -> tuple[dict[str, str], list[dict[str, str]]]:
+    """Return a compatibility summary and sanitized, ordered OG declarations.
+
+    The first image root (including its :url alias) owns only the image
+    properties before the next OG root. Other OG fields retain last-value
+    summary behavior; the declarations, not the summary, preserve all evidence.
+    """
+    summary: dict[str, str] = {}
+    declarations: list[dict[str, str]] = []
+    found_image = False
+    in_first_image = False
+    for item in parser.meta:
+        name = item.get("property", "")
+        if not name.startswith("og:"):
+            continue
+        # Match the existing URL-userinfo redaction policy, including URLs in
+        # free text. Do not copy arbitrary, potentially sensitive HTML attributes.
+        content = re.sub(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+",
+                         lambda match: redact_url(match.group()),
+                         redact_url(item.get("content", "")))
+        declarations.append({"property": name, "content": content,
+                             "location": item.get("location", "outside_head_body")})
+        if name in {"og:image", "og:image:url"}:
+            in_first_image = not found_image
+            found_image = True
+            if in_first_image:
+                summary[name] = content
+        elif name.startswith("og:image:"):
+            if in_first_image:
+                # First declaration wins even when its content is blank.
+                summary.setdefault(name, content)
+        else:
+            summary[name] = content
+            if name.count(":") == 1 or name in {"og:video:url", "og:audio:url"}:
+                in_first_image = False
+    return summary, declarations
+
+
 def first_link(parser: MetaParser, rel: str) -> str | None:
     for item in parser.links:
         rels = {part.lower() for part in item.get("rel", "").split()}
@@ -498,6 +536,7 @@ def audit(url: str) -> dict:
     parser = MetaParser()
     parser.feed(page["body"])
     parser.finish()
+    open_graph, open_graph_declarations = open_graph_evidence(parser)
     base = page.get("url") or url
     resources = crawl_resource_checks(base)
     robots, sitemap = resources["robots_txt"], resources["sitemap_xml"]
@@ -511,7 +550,8 @@ def audit(url: str) -> dict:
             "canonical": redact_url(first_link(parser, "canonical")) if first_link(parser, "canonical") else None,
             "canonicals": link_evidence(parser, base, "canonical"),
             "hreflang": [item for item in link_evidence(parser, base, "alternate") if item.get("hreflang")],
-            "open_graph": all_meta_prefix(parser, "property", "og:"),
+            "open_graph": open_graph,
+            "open_graph_declarations": open_graph_declarations,
             "twitter": all_meta_prefix(parser, "name", "twitter:"),
             "json_ld_count": parser.json_ld_count,
             "json_ld": parser.json_ld,
@@ -520,7 +560,7 @@ def audit(url: str) -> dict:
                 "has_title": bool(" ".join(parser.title.split())),
                 "has_meta_description": bool(first_meta(parser, "name", "description")),
                 "has_canonical": bool(first_link(parser, "canonical")),
-                "has_og_title": bool(all_meta_prefix(parser, "property", "og:").get("og:title")),
+                "has_og_title": bool(open_graph.get("og:title")),
                 "has_json_ld": parser.json_ld_count > 0,
                 "has_robots_txt": any(item.get("present") for item in robots),
                 "has_sitemap_xml": any(item.get("present") for item in sitemap),
