@@ -162,8 +162,9 @@ def json_ld_evidence(body: str) -> dict:
     return evidence
 
 
-def fetch(url: str, timeout: int = 20) -> dict:
-    return fetch_public_url(url, timeout=timeout)
+def fetch(url: str, timeout: int = 20, *, budget: public_http.HTTPAttemptBudget | None = None) -> dict:
+    return fetch_public_url(url, timeout=timeout,
+                            **({"budget": budget} if budget is not None else {}))
 
 
 def first_meta(parser: MetaParser, key: str, value: str) -> str | None:
@@ -272,7 +273,7 @@ def resource_check(item: dict, filename: str) -> dict:
     evidence = sitemap_evidence(item) if filename == "sitemap.xml" and item.get("http_status") == 200 else None
     present, reason = resource_present(item, filename, evidence)
     result = {key: value for key, value in item.items() if key != "body"}
-    result["present"] = present
+    result["present"] = (None if item.get("reason_code") == "http_attempt_budget_exhausted" else present)
     if reason:
         result["reason"] = reason
     if item.get("status") == "ok" and encoded_resource(item):
@@ -358,8 +359,9 @@ def robots_access(item: dict, url: str) -> dict:
     return output
 
 
-def crawl_resource_checks(base_url: str) -> dict:
-    robots = [fetch(candidate) for candidate in resource_candidates(base_url, "robots.txt")]
+def crawl_resource_checks(base_url: str, *, budget: public_http.HTTPAttemptBudget | None = None) -> dict:
+    options = {"budget": budget} if budget is not None else {}
+    robots = [fetch(candidate, **options) for candidate in resource_candidates(base_url, "robots.txt")]
     declarations = []
     for item in robots:
         if not resource_present(item, "robots.txt")[0]:
@@ -374,14 +376,28 @@ def crawl_resource_checks(base_url: str) -> dict:
     candidates = list(dict.fromkeys(declarations + resource_candidates(base_url, "sitemap.xml")))
     checked = candidates[:_MAX_SITEMAP_CANDIDATES]
     robots_truncated = any(item.get("body_truncated") for item in robots)
+    sitemap_checks = []
+    checked_count = 0
+    for candidate in checked:
+        before = budget.attempts_used if budget is not None else 0
+        item = fetch(candidate, **options)
+        # A refused, never-started candidate is unavailable, not checked. A
+        # started redirect/fallback chain remains counted with its evidence.
+        if item.get("reason_code") != "http_attempt_budget_exhausted" or (budget is not None and budget.attempts_used > before):
+            checked_count += 1
+        sitemap_checks.append(resource_check(item, "sitemap.xml"))
+    budget_denied = any(item.get("reason_code") == "http_attempt_budget_exhausted" for item in robots + sitemap_checks)
+    robots_unavailable = budget is not None and any(
+        item.get("status") != "ok" and item.get("http_status") not in {404, 410} for item in robots
+    )
     return {
         "robots_txt": [resource_check(item, "robots.txt") for item in robots],
         "robots_access": robots_access(robots[0], base_url),
-        "sitemap_xml": [resource_check(fetch(candidate), "sitemap.xml") for candidate in checked],
+        "sitemap_xml": sitemap_checks,
         "sitemap_discovery": {
             "declaration_count": len(declarations), "unique_candidate_count": len(candidates),
-            "checked_count": len(checked), "omitted_count": len(candidates) - len(checked),
-            "complete": len(checked) == len(candidates) and not robots_truncated and not any(encoded_resource(item) for item in robots),
+            "checked_count": checked_count, "omitted_count": len(candidates) - checked_count,
+            "complete": len(checked) == len(candidates) and not robots_truncated and not any(encoded_resource(item) for item in robots) and not budget_denied and not robots_unavailable,
             "robots_body_truncated": robots_truncated,
         },
     }
@@ -555,16 +571,59 @@ def assess(result: dict, parser: MetaParser | None, resources: dict | None) -> N
         add("h1_review", "info", "Review the observed heading hierarchy in context; H1 count alone is not an indexing failure.", "h1", "Likely")
 
 
-def audit(url: str) -> dict:
+def _execution_result(result: dict, budget: public_http.HTTPAttemptBudget | None) -> dict:
+    if budget is None:
+        return result
+    events = []
+    substantive = False
+    def inspect(value: object, path: str) -> None:
+        nonlocal substantive
+        if isinstance(value, dict):
+            if value.get("reason_code") == "http_attempt_budget_exhausted":
+                events.append({"reason_code": value["reason_code"], "stage": "page" if path == "page" else "crawl_resources", "evidence": path})
+            if value.get("http_status") is not None or value.get("redirects") or value.get("endpoint_errors") or value.get("status") == "error":
+                substantive = True
+            for key, child in value.items():
+                inspect(child, f"{path}.{key}" if path else key)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                inspect(child, f"{path}[{index}]")
+    inspect(result, "")
+    result["execution"] = {
+        "limits": {"max_http_attempts": budget.max_http_attempts},
+        "usage": {"http_attempts": budget.attempts_used},
+        "completion": "complete" if not events else "partial" if substantive else "blocked",
+        "limit_events": events,
+        "coverage_scope": "completion describes only collection omitted by this attempt allowance, not full audit coverage",
+        "coverage_exclusions": ["DNS, HTTP headers, TLS/proxy framing and subprocess requests are not counted", "No elapsed-time or response-byte allowance is enforced", "Unknown robots declarations are not included in known-candidate counts"],
+    }
+    if events and result["page"].get("status") == "ok":
+        result["findings"].append({"code": "http_attempt_budget_exhausted", "severity": "warning", "confidence": "Confirmed",
+                                   "message": "HTTP attempt allowance stopped auxiliary collection; unchecked resources are unavailable, not missing.",
+                                   "evidence": "execution.limit_events"})
+    return result
+
+
+def _resource_presence(items: list[dict]) -> bool | None:
+    if any(item.get("present") for item in items):
+        return True
+    if any(item.get("present") is None for item in items):
+        return None
+    return False
+
+
+def audit(url: str, *, max_http_attempts: int | None = None) -> dict:
+    budget = public_http.HTTPAttemptBudget(max_http_attempts) if max_http_attempts is not None else None
+    options = {"budget": budget} if budget is not None else {}
     collected_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    page = fetch(url)
+    page = fetch(url, **options)
     result = {"url": redact_url(url), "collected_at": collected_at,
               "capture": {"scope": "raw_html", "body_truncated": page.get("body_truncated"), "rendered": False},
               "page": {key: value for key, value in page.items() if key != "body"}, "findings": []}
     if page.get("status") != "ok":
         result["findings"].append({"code": "page_fetch_error", "severity": "error", "confidence": "Confirmed",
                                    "message": "Page fetch failed; metadata assessment is unavailable.", "evidence": "page"})
-        return result
+        return _execution_result(result, budget)
 
     media_type = str(page.get("content_type") or "").split(";", 1)[0].strip().lower()
     encoded = encoded_resource(page)
@@ -575,14 +634,14 @@ def audit(url: str) -> dict:
                                    "message": f"HTML metadata checks were skipped ({reason}); no missing-metadata verdict is made.",
                                    "evidence": "page"})
         assess(result, None, None)
-        return result
+        return _execution_result(result, budget)
 
     parser = MetaParser()
     parser.feed(page["body"])
     parser.finish()
     open_graph, open_graph_declarations = open_graph_evidence(parser)
     base = page.get("url") or url
-    resources = crawl_resource_checks(base)
+    resources = crawl_resource_checks(base, **options)
     robots, sitemap = resources["robots_txt"], resources["sitemap_xml"]
 
     result.update(
@@ -606,8 +665,8 @@ def audit(url: str) -> dict:
                 "has_canonical": bool(first_link(parser, "canonical")),
                 "has_og_title": bool(open_graph.get("og:title")),
                 "has_json_ld": parser.json_ld_count > 0,
-                "has_robots_txt": any(item.get("present") for item in robots),
-                "has_sitemap_xml": any(item.get("present") for item in sitemap),
+                "has_robots_txt": _resource_presence(robots),
+                "has_sitemap_xml": _resource_presence(sitemap),
                 "robots_txt": robots,
                 "sitemap_xml": sitemap,
                 "sitemap_discovery": resources["sitemap_discovery"],
@@ -615,7 +674,17 @@ def audit(url: str) -> dict:
         }
     )
     assess(result, parser, resources)
-    return result
+    return _execution_result(result, budget)
+
+
+def _nonnegative_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a nonnegative integer") from exc
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be a nonnegative integer")
+    return number
 
 
 def main() -> int:
@@ -623,17 +692,18 @@ def main() -> int:
     parser.add_argument("url", help="Public URL to inspect.")
     parser.add_argument("--json", action="store_true", help="Emit JSON output.")
     parser.add_argument("--fail-on", choices=tuple(_SEVERITY), help="Exit 1 for findings at this severity or higher; default only fails on page fetch errors.")
+    parser.add_argument("--max-http-attempts", type=_nonnegative_int, help="Optional logical target-attempt allowance shared across this audit; 0 starts no HTTP attempts.")
     args = parser.parse_args()
     # Leave URL/DNS validation to audit→fetch so --json always emits structured
     # page errors (exit 1) instead of argparse usage text (exit 2) on resolution failures.
-    result = audit(args.url)
+    result = audit(args.url, **({"max_http_attempts": args.max_http_attempts} if args.max_http_attempts is not None else {}))
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
         page = result.get("page", {})
         print(f"url: {result.get('url', args.url)}")
         print(f"status: {page.get('http_status')}")
-        if page.get("status") == "error" and page.get("reason"):
+        if page.get("status") in {"error", "unavailable"} and page.get("reason"):
             print(f"reason: {page.get('reason')}")
         print(f"title: {result.get('title')}")
         print(f"description: {result.get('meta_description')}")
