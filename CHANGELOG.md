@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Keep repository JSON reports available when external commands cannot launch
+  or emit invalid UTF-8; preserve existing missing-tool/timeout/exit behavior.
+- Separate public performance access from property-authorized Search Console,
+  and refresh dated AI reporting, structured-data and provider billing guidance.
 - Classify sitemap XML by root/namespace and keep dormant templates, SVG titles
   and script/style source out of raw document metadata; recognize omitted heads.
 - Preserve homepage path slashes, validate restricted Shipwise input structure
