@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add evidence-backed page findings and opt-in `--fail-on` severity gates while
+  preserving default fetch exit codes. Evaluate per-crawler robots permissions,
+  scoped noindex directives, HTML canonical declarations and JSON-LD parsing;
+  keep indexing state unknown and heading/length observations separate.
+
 - Include implicit Cargo workspace members and resolve inherited root-package
   metadata even when no explicit member list is provided.
 - Add a CLI-installable local marketplace, exercised plugin/browser acceptance,
