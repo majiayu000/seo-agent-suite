@@ -345,6 +345,44 @@ def infer_homepages(manifests: dict) -> list[str]:
     return urls
 
 
+def decode_yaml_quoted_string(content: str) -> str:
+    """Decode single-line YAML 1.2.2 section 5.7 escapes, not Python escapes."""
+    escapes = {
+        '0': '\0', 'a': '\a', 'b': '\b', 't': '\t', '\t': '\t',
+        'n': '\n', 'v': '\v', 'f': '\f', 'r': '\r', 'e': '\x1b',
+        ' ': ' ', '"': '"', '/': '/', '\\': '\\', 'N': '\x85',
+        '_': '\xa0', 'L': '\u2028', 'P': '\u2029',
+    }
+    widths = {'x': 2, 'u': 4, 'U': 8}
+    result = []
+    index = 0
+    while index < len(content):
+        char = content[index]
+        index += 1
+        if char != '\\':
+            result.append(char)
+            continue
+        if index == len(content):
+            raise ValueError('invalid escape in double-quoted YAML scalar')
+        escape = content[index]
+        index += 1
+        if escape in escapes:
+            result.append(escapes[escape])
+        elif escape in widths:
+            width = widths[escape]
+            digits = content[index:index + width]
+            if len(digits) != width or re.fullmatch(r'[0-9a-fA-F]+', digits) is None:
+                raise ValueError('invalid Unicode escape in double-quoted YAML scalar')
+            codepoint = int(digits, 16)
+            if codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF:
+                raise ValueError('invalid Unicode scalar value in double-quoted YAML scalar')
+            result.append(chr(codepoint))
+            index += width
+        else:
+            raise ValueError('unsupported escape in double-quoted YAML scalar')
+    return ''.join(result)
+
+
 def parse_scalar(value: str) -> object:
     value = value.strip()
     tag = None
@@ -361,7 +399,9 @@ def parse_scalar(value: str) -> object:
     if quoted:
         literal = quoted.group(1)
         content = literal[1:-1]
-        return content.replace("''", "'") if literal.startswith("'") else content
+        return content.replace("''", "'") if literal.startswith("'") else decode_yaml_quoted_string(content)
+    if value.startswith('"'):
+        raise ValueError("unsupported or malformed double-quoted YAML scalar")
     value = re.split(r"(?:^|\s+)#", value, maxsplit=1)[0].rstrip()
     # Aliases cannot be typed without resolving the document's anchors.
     if value.startswith("*"):
