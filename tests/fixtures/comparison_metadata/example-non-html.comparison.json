@@ -1,0 +1,122 @@
+{
+  "contract_version": "1.0",
+  "producer": {
+    "id": "seo-agent-suite/site-meta",
+    "tool_version": "0.2.0",
+    "report_schema_version": "1.0",
+    "ruleset_id": "site.raw_html.presence",
+    "ruleset_version": "1"
+  },
+  "target": {
+    "kind": "site",
+    "identity_state": "exact",
+    "requested_url": "https://example.com/docs/",
+    "effective_url": "https://example.com/docs/",
+    "reason": null
+  },
+  "scope": {
+    "method": "raw_html_lexical_presence_v1",
+    "rendered": false,
+    "subject_ids": [
+      "page"
+    ],
+    "rule_ids": [
+      "site.meta.canonical",
+      "site.meta.description",
+      "site.meta.json_ld",
+      "site.meta.og_title",
+      "site.meta.title"
+    ],
+    "limits": {
+      "max_body_bytes": 1000000,
+      "timeout_seconds": 20,
+      "max_redirects": 5
+    },
+    "request_headers": {
+      "User-Agent": "seo-agent-suite/0.2.0 (+https://github.com/majiayu000/seo-agent-suite)",
+      "Accept": "*/*"
+    },
+    "resources": "excluded",
+    "adapters": [],
+    "configuration_status": "verified"
+  },
+  "collection": {
+    "completion": "not_applicable",
+    "reasons": [
+      "non_html"
+    ],
+    "evidence_refs": [
+      "/page",
+      "/capture"
+    ]
+  },
+  "provenance": {
+    "identity_policy": "exact_input_and_successful_response_v1",
+    "requested_url_ref": "/url",
+    "effective_url_ref": "/page/url",
+    "url_redaction": "none",
+    "resources": {
+      "comparison_scope": "excluded",
+      "coverage": "unknown",
+      "reason": "not_assessed_by_this_contract",
+      "evidence_refs": []
+    }
+  },
+  "evaluations": [
+    {
+      "rule_id": "site.meta.canonical",
+      "subject_id": "page",
+      "outcome": "skip",
+      "completion": "not_applicable",
+      "reason": "non_html",
+      "evidence_refs": [
+        "/page"
+      ],
+      "legacy_finding_ids": []
+    },
+    {
+      "rule_id": "site.meta.description",
+      "subject_id": "page",
+      "outcome": "skip",
+      "completion": "not_applicable",
+      "reason": "non_html",
+      "evidence_refs": [
+        "/page"
+      ],
+      "legacy_finding_ids": []
+    },
+    {
+      "rule_id": "site.meta.json_ld",
+      "subject_id": "page",
+      "outcome": "skip",
+      "completion": "not_applicable",
+      "reason": "non_html",
+      "evidence_refs": [
+        "/page"
+      ],
+      "legacy_finding_ids": []
+    },
+    {
+      "rule_id": "site.meta.og_title",
+      "subject_id": "page",
+      "outcome": "skip",
+      "completion": "not_applicable",
+      "reason": "non_html",
+      "evidence_refs": [
+        "/page"
+      ],
+      "legacy_finding_ids": []
+    },
+    {
+      "rule_id": "site.meta.title",
+      "subject_id": "page",
+      "outcome": "skip",
+      "completion": "not_applicable",
+      "reason": "non_html",
+      "evidence_refs": [
+        "/page"
+      ],
+      "legacy_finding_ids": []
+    }
+  ]
+}

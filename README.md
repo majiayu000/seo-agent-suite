@@ -81,6 +81,43 @@ Prefer `findings[]` for reports. Keep reading nested evidence when you need raw 
 
 `status: ok` is **not** a ranking or launch-readiness verdict.
 
+### Page comparison metadata (bounded P05 prerequisite)
+
+New packaged `seo-agent site-meta` reports include an additive `comparison`
+block with independent `contract_version: "1.0"`; the existing `site_meta` MCP
+wrapper returns the same block. Unknown envelope fields are ignorable. This
+retains the observed-open envelope `schema_version: "1.0"`, but strict external
+exact-key consumers must accommodate the new field.
+
+Only five existing raw-HTML lexical presence checks are covered: title, meta
+description, canonical link, `og:title`, and a JSON-LD script start. Their
+stable rule IDs and `page` subject do not depend on outcome-dependent legacy
+finding IDs. A collection can be complete while SEO status is partial. A
+truncated page can contain positive observations without becoming complete.
+
+The requested and successful effective URLs are exact strings: spelling,
+query order, fragment, casing and slashes are preserved. Scope includes actual
+bound body/timeout/redirect defaults and public User-Agent/Accept headers.
+Unrecognized callable paths or unavailable configuration produce explicit
+nulls and unknown collection. The runtime resolver recognizes reviewed
+collector source and executed code; source-less/custom wrappers are
+conservatively unverified, including in an installed package. It reads no
+credentials, proxies or environment configuration.
+
+Resources are excluded with unknown coverage even when legacy sitemap
+discovery says complete. Repository reports and old reports without metadata
+are incomparable; enriching an old report does not retrofit the block.
+
+See [the metadata contract](references/comparison-metadata.md) and
+[block-only JSON Schema](references/comparison-metadata.schema.json). The
+dependency-free `validate_site_comparison_metadata(report)` checks containing
+evidence and contract consistency beyond schema shape. Original invocation
+URL and runtime policy may be supplied to verify those production inputs;
+stored metadata is not a historical attestation. There is no comparator or
+history database yet. Future resolution may mean only a passing lexical check
+in a new, fully comparable capture, never proof of deployment, indexing,
+ranking, or all SEO issues being fixed.
+
 ### Optional MCP
 
 ```bash

@@ -24,7 +24,7 @@ jobs:
           python-version: ${{ matrix.python }}
 
       - name: Install package
-        run: python3 -m pip install -e .
+        run: python3 -m pip install -e . 'setuptools>=68' wheel
 
       - name: Compile scripts
         run: python3 -m py_compile scripts/*.py

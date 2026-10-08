@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Sequence
 
 from seo_agent_suite import SCHEMA_VERSION, __version__
+from seo_agent_suite.comparison_metadata import build_site_comparison_metadata
+from seo_agent_suite.comparison_runtime import resolve_site_runtime_policy
 from seo_agent_suite.paths import ensure_scripts_on_path, load_script, suite_root
 from seo_agent_suite.report import (
     attach_envelope,
@@ -130,9 +132,13 @@ def cmd_repo_baseline(args: argparse.Namespace) -> int:
 
 def cmd_site_meta(args: argparse.Namespace) -> int:
     module = load_script("site_meta_audit.py")
-    result = module.audit(args.url)
+    audit_options: dict = {}
+    result = module.audit(args.url, **audit_options)
     if "findings" not in result or "schema_version" not in result:
         result = enrich_site_result(result)
+    result["comparison"] = build_site_comparison_metadata(
+        result, args.url, resolve_site_runtime_policy(module, audit_options=audit_options)
+    )
     if args.json:
         _print_json(result)
     else:
