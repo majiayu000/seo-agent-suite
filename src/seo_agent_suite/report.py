@@ -110,6 +110,18 @@ def findings_from_site_audit(result: Mapping[str, Any]) -> list[dict[str, Any]]:
     )
     for key, fid, label, severity, surface in check_specs:
         present = bool(checks.get(key))
+        if not present and surface == "meta" and result.get("capture", {}).get("body_truncated"):
+            findings.append(make_finding(
+                id=f"{fid}.unknown", title=f"Cannot determine {label} presence",
+                severity="info", confidence="hypothesis", surface=surface,
+                status="unknown", detail="Truncated HTML does not establish absence.",
+                evidence=[
+                    {"kind": "json_pointer", "path": f"/checks/{key}"},
+                    {"kind": "json_pointer", "path": "/capture/body_truncated"},
+                    {"kind": "url", "value": url},
+                ],
+            ))
+            continue
         resource_key = {"has_robots_txt": "robots_txt", "has_sitemap_xml": "sitemap_xml"}.get(key)
         resources = checks.get(resource_key) if resource_key else None
         if not present and isinstance(resources, list) and resources:
