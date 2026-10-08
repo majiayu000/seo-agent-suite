@@ -1,0 +1,392 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Proposed site comparison metadata 1.0 (review only)",
+  "type": "object",
+  "properties": {
+    "contract_version": {
+      "const": "1.0"
+    },
+    "producer": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "const": "seo-agent-suite/site-meta"
+        },
+        "tool_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "report_schema_version": {
+          "const": "1.0"
+        },
+        "ruleset_id": {
+          "const": "site.raw_html.presence"
+        },
+        "ruleset_version": {
+          "const": "1"
+        }
+      },
+      "required": [
+        "id",
+        "tool_version",
+        "report_schema_version",
+        "ruleset_id",
+        "ruleset_version"
+      ],
+      "additionalProperties": false
+    },
+    "target": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "site"
+        },
+        "identity_state": {
+          "type": "string",
+          "enum": [
+            "exact",
+            "unknown"
+          ]
+        },
+        "requested_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effective_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "enum": [
+            null,
+            "requested_identity_redacted",
+            "requested_identity_unavailable",
+            "effective_identity_unavailable"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "identity_state",
+        "requested_url",
+        "effective_url",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "scope": {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "raw_html_lexical_presence_v1"
+        },
+        "rendered": {
+          "const": false
+        },
+        "subject_ids": {
+          "const": [
+            "page"
+          ]
+        },
+        "rule_ids": {
+          "const": [
+            "site.meta.canonical",
+            "site.meta.description",
+            "site.meta.json_ld",
+            "site.meta.og_title",
+            "site.meta.title"
+          ]
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "max_body_bytes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            },
+            "timeout_seconds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            },
+            "max_redirects": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          },
+          "required": [
+            "max_body_bytes",
+            "timeout_seconds",
+            "max_redirects"
+          ],
+          "additionalProperties": false
+        },
+        "request_headers": {
+          "type": "object",
+          "properties": {
+            "User-Agent": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1
+            },
+            "Accept": {
+              "enum": [
+                "*/*",
+                null
+              ]
+            }
+          },
+          "required": [
+            "User-Agent",
+            "Accept"
+          ],
+          "additionalProperties": false
+        },
+        "resources": {
+          "const": "excluded"
+        },
+        "adapters": {
+          "const": []
+        },
+        "configuration_status": {
+          "type": "string",
+          "enum": [
+            "verified",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "method",
+        "rendered",
+        "subject_ids",
+        "rule_ids",
+        "limits",
+        "request_headers",
+        "resources",
+        "adapters",
+        "configuration_status"
+      ],
+      "additionalProperties": false
+    },
+    "collection": {
+      "type": "object",
+      "properties": {
+        "completion": {
+          "type": "string",
+          "enum": [
+            "complete",
+            "incomplete",
+            "unknown",
+            "not_applicable"
+          ]
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "observed_present",
+              "confirmed_absent",
+              "page_fetch_error",
+              "body_truncated",
+              "unsupported_encoding",
+              "non_html",
+              "unknown_media_type",
+              "missing_capture_evidence",
+              "missing_check_evidence",
+              "identity_unavailable",
+              "configuration_unverified"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^/(?:[^~]|~[01])*$"
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "completion",
+        "reasons",
+        "evidence_refs"
+      ],
+      "additionalProperties": false
+    },
+    "provenance": {
+      "type": "object",
+      "properties": {
+        "identity_policy": {
+          "const": "exact_input_and_successful_response_v1"
+        },
+        "requested_url_ref": {
+          "enum": [
+            "/url",
+            null
+          ]
+        },
+        "effective_url_ref": {
+          "enum": [
+            "/page/url",
+            null
+          ]
+        },
+        "url_redaction": {
+          "type": "string",
+          "enum": [
+            "none",
+            "applied",
+            "unknown"
+          ]
+        },
+        "resources": {
+          "type": "object",
+          "properties": {
+            "comparison_scope": {
+              "const": "excluded"
+            },
+            "coverage": {
+              "const": "unknown"
+            },
+            "reason": {
+              "const": "not_assessed_by_this_contract"
+            },
+            "evidence_refs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^/(?:[^~]|~[01])*$"
+              },
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "comparison_scope",
+            "coverage",
+            "reason",
+            "evidence_refs"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "identity_policy",
+        "requested_url_ref",
+        "effective_url_ref",
+        "url_redaction",
+        "resources"
+      ],
+      "additionalProperties": false
+    },
+    "evaluations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "enum": [
+              "site.meta.canonical",
+              "site.meta.description",
+              "site.meta.json_ld",
+              "site.meta.og_title",
+              "site.meta.title"
+            ]
+          },
+          "subject_id": {
+            "const": "page"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "pass",
+              "fail",
+              "unknown",
+              "skip"
+            ]
+          },
+          "completion": {
+            "type": "string",
+            "enum": [
+              "complete",
+              "incomplete",
+              "not_applicable"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "observed_present",
+              "confirmed_absent",
+              "page_fetch_error",
+              "body_truncated",
+              "unsupported_encoding",
+              "non_html",
+              "unknown_media_type",
+              "missing_capture_evidence",
+              "missing_check_evidence",
+              "identity_unavailable",
+              "configuration_unverified"
+            ]
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^/(?:[^~]|~[01])*$"
+            },
+            "uniqueItems": true
+          },
+          "legacy_finding_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "rule_id",
+          "subject_id",
+          "outcome",
+          "completion",
+          "reason",
+          "evidence_refs",
+          "legacy_finding_ids"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 5,
+      "maxItems": 5
+    }
+  },
+  "required": [
+    "contract_version",
+    "producer",
+    "target",
+    "scope",
+    "collection",
+    "provenance",
+    "evaluations"
+  ],
+  "additionalProperties": false
+}

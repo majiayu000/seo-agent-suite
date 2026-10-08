@@ -1,0 +1,139 @@
+{
+  "contract_version": "1.0",
+  "producer": {
+    "id": "seo-agent-suite/site-meta",
+    "tool_version": "0.2.0",
+    "report_schema_version": "1.0",
+    "ruleset_id": "site.raw_html.presence",
+    "ruleset_version": "1"
+  },
+  "target": {
+    "kind": "site",
+    "identity_state": "exact",
+    "requested_url": "https://example.com/docs/",
+    "effective_url": "https://example.com/docs/",
+    "reason": null
+  },
+  "scope": {
+    "method": "raw_html_lexical_presence_v1",
+    "rendered": false,
+    "subject_ids": [
+      "page"
+    ],
+    "rule_ids": [
+      "site.meta.canonical",
+      "site.meta.description",
+      "site.meta.json_ld",
+      "site.meta.og_title",
+      "site.meta.title"
+    ],
+    "limits": {
+      "max_body_bytes": 1000000,
+      "timeout_seconds": 20,
+      "max_redirects": 5
+    },
+    "request_headers": {
+      "User-Agent": "seo-agent-suite/0.2.0 (+https://github.com/majiayu000/seo-agent-suite)",
+      "Accept": "*/*"
+    },
+    "resources": "excluded",
+    "adapters": [],
+    "configuration_status": "verified"
+  },
+  "collection": {
+    "completion": "complete",
+    "reasons": [],
+    "evidence_refs": [
+      "/page",
+      "/capture"
+    ]
+  },
+  "provenance": {
+    "identity_policy": "exact_input_and_successful_response_v1",
+    "requested_url_ref": "/url",
+    "effective_url_ref": "/page/url",
+    "url_redaction": "none",
+    "resources": {
+      "comparison_scope": "excluded",
+      "coverage": "unknown",
+      "reason": "not_assessed_by_this_contract",
+      "evidence_refs": [
+        "/checks/robots_txt",
+        "/checks/sitemap_xml",
+        "/checks/sitemap_discovery"
+      ]
+    }
+  },
+  "evaluations": [
+    {
+      "rule_id": "site.meta.canonical",
+      "subject_id": "page",
+      "outcome": "pass",
+      "completion": "complete",
+      "reason": "observed_present",
+      "evidence_refs": [
+        "/checks/has_canonical",
+        "/capture"
+      ],
+      "legacy_finding_ids": [
+        "site.meta.canonical.present"
+      ]
+    },
+    {
+      "rule_id": "site.meta.description",
+      "subject_id": "page",
+      "outcome": "pass",
+      "completion": "complete",
+      "reason": "observed_present",
+      "evidence_refs": [
+        "/checks/has_meta_description",
+        "/capture"
+      ],
+      "legacy_finding_ids": [
+        "site.meta.description.present"
+      ]
+    },
+    {
+      "rule_id": "site.meta.json_ld",
+      "subject_id": "page",
+      "outcome": "pass",
+      "completion": "complete",
+      "reason": "observed_present",
+      "evidence_refs": [
+        "/checks/has_json_ld",
+        "/capture"
+      ],
+      "legacy_finding_ids": [
+        "site.meta.json_ld.present"
+      ]
+    },
+    {
+      "rule_id": "site.meta.og_title",
+      "subject_id": "page",
+      "outcome": "pass",
+      "completion": "complete",
+      "reason": "observed_present",
+      "evidence_refs": [
+        "/checks/has_og_title",
+        "/capture"
+      ],
+      "legacy_finding_ids": [
+        "site.meta.og_title.present"
+      ]
+    },
+    {
+      "rule_id": "site.meta.title",
+      "subject_id": "page",
+      "outcome": "fail",
+      "completion": "complete",
+      "reason": "confirmed_absent",
+      "evidence_refs": [
+        "/checks/has_title",
+        "/capture"
+      ],
+      "legacy_finding_ids": [
+        "site.meta.title.missing"
+      ]
+    }
+  ]
+}

@@ -84,3 +84,13 @@ conditions. Keep local verification, the change served on the live site, engine
 indexing, and traffic/conversion or citation effects separate. A passing
 retest completes the fix criterion, not a ranking promise; schedule later
 observations only when the task includes them.
+
+## Packaged Page Comparison Metadata
+
+For a newly collected packaged site report, retain its additive `comparison`
+block alongside legacy findings. Label its scope as five raw-HTML lexical
+presence checks, not all SEO issues. Record exact requested/effective URLs,
+known/unknown collection policy, and collection completion separately from SEO
+status. Resources are excluded with unknown coverage. Old or repository
+reports are incomparable; do not retrofit metadata or infer repo identity from
+its directory. See [comparison metadata v1](comparison-metadata.md).
