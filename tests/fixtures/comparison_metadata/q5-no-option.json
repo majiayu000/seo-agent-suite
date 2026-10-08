@@ -1,0 +1,522 @@
+[
+  {
+    "path": "scripts/public_http.py",
+    "before_sha256": "fbccf869ddd56db35b9cdb064c191ba4fdce2f8a55cbc931c7e1b158bf7f89b1",
+    "after_sha256": "6327d14c09594c5c7b3130cb4508ec8bdb919a38886642fd19f779108b920a41",
+    "hunks": [
+      {
+        "before_start": 53,
+        "after_start": 53,
+        "before": [],
+        "after": [
+          "\n",
+          "\n",
+          "class HTTPBodyBudgetExhausted(Exception):\n",
+          "    \"\"\"An exposed-payload collection limit, never a retriable failure.\"\"\"\n",
+          "\n",
+          "    def __init__(self, prior_errors: list[str] | None = None):\n",
+          "        super().__init__(\"HTTP exposed body-payload byte allowance exhausted\")\n",
+          "        self.prior_errors = list(prior_errors or [])\n",
+          "\n",
+          "\n",
+          "class HTTPBodyBudget:\n",
+          "    \"\"\"Count encoded payload exposed by reads, not physical network traffic.\n",
+          "\n",
+          "    Socket buffering, framing, and bytes hidden by failed reads are excluded.\n",
+          "    \"\"\"\n",
+          "\n",
+          "    def __init__(self, max_http_body_bytes: int):\n",
+          "        if type(max_http_body_bytes) is not int or max_http_body_bytes < 0:\n",
+          "            raise ValueError(\"max_http_body_bytes must be a nonnegative integer\")\n",
+          "        self.max_http_body_bytes = max_http_body_bytes\n",
+          "        self.bytes_used = 0\n",
+          "        self.attempts_started = 0\n",
+          "\n",
+          "    @property\n",
+          "    def remaining(self) -> int:\n",
+          "        return self.max_http_body_bytes - self.bytes_used\n",
+          "\n",
+          "    def require_remaining(self, prior_errors: list[str] | None = None) -> None:\n",
+          "        if self.remaining == 0:\n",
+          "            raise HTTPBodyBudgetExhausted(prior_errors)\n"
+        ]
+      },
+      {
+        "before_start": 190,
+        "after_start": 220,
+        "before": [],
+        "after": [
+          "\n",
+          "\n",
+          "def _read_body_evidence(response: http.client.HTTPResponse, max_body_bytes: int,\n",
+          "                        body_budget: HTTPBodyBudget | None) -> dict:\n",
+          "    if body_budget is None:\n",
+          "        return {\"body\": _read_success_body(response, max_body_bytes)}\n",
+          "    # Preserve the header-only treatment of redirect/error responses.\n",
+          "    if not 200 <= response.status < 300:\n",
+          "        return {\"body\": b\"\"}\n",
+          "    expected = getattr(response, \"length\", None)\n",
+          "    known_length = type(expected) is int and expected >= 0\n",
+          "    amount = min(max_body_bytes, body_budget.remaining)\n",
+          "    try:\n",
+          "        body = response.read(amount)\n",
+          "    except http.client.IncompleteRead as exc:\n",
+          "        # Only exposed partial payload can be counted; hidden failed-read bytes\n",
+          "        # are not observable through this API. Never count this partial twice.\n",
+          "        body_budget.bytes_used += len(exc.partial)\n",
+          "        raise\n",
+          "    body_budget.bytes_used += len(body)\n",
+          "    if known_length and len(body) < min(expected, amount):\n",
+          "        raise http.client.IncompleteRead(body, min(expected, amount) - len(body))\n",
+          "    complete = len(body) == expected if known_length else len(body) < amount\n",
+          "    if not complete and body_budget.remaining == 0:\n",
+          "        return {\"body\": body, \"reason_code\": \"http_body_budget_exhausted\",\n",
+          "                \"reason\": \"HTTP exposed body-payload byte allowance reached; response completion is unverified\"}\n",
+          "    return {\"body\": body}\n"
+        ]
+      },
+      {
+        "before_start": 428,
+        "after_start": 485,
+        "before": [],
+        "after": [
+          "    body_budget: HTTPBodyBudget | None = None,\n"
+        ]
+      },
+      {
+        "before_start": 445,
+        "after_start": 503,
+        "before": [],
+        "after": [
+          "        if body_budget is not None:\n",
+          "            body_budget.require_remaining(errors)\n"
+        ]
+      },
+      {
+        "before_start": 447,
+        "after_start": 507,
+        "before": [],
+        "after": [
+          "        if body_budget is not None:\n",
+          "            body_budget.attempts_started += 1\n"
+        ]
+      },
+      {
+        "before_start": 474,
+        "after_start": 536,
+        "before": [
+          "                body = _read_success_body(response, max_body_bytes)\n"
+        ],
+        "after": [
+          "                body_evidence = _read_body_evidence(response, max_body_bytes, body_budget)\n",
+          "                body = body_evidence[\"body\"]\n"
+        ]
+      },
+      {
+        "before_start": 483,
+        "after_start": 546,
+        "before": [
+          "                    \"body\": body,\n"
+        ],
+        "after": [
+          "                    **body_evidence,\n"
+        ]
+      },
+      {
+        "before_start": 496,
+        "after_start": 559,
+        "before": [],
+        "after": [
+          "    body_budget: HTTPBodyBudget | None = None,\n"
+        ]
+      },
+      {
+        "before_start": 499,
+        "after_start": 563,
+        "before": [],
+        "after": [
+          "    if body_budget is not None:\n",
+          "        body_budget.require_remaining()\n"
+        ]
+      },
+      {
+        "before_start": 508,
+        "after_start": 574,
+        "before": [],
+        "after": [
+          "            **({\"body_budget\": body_budget} if body_budget is not None else {}),\n"
+        ]
+      },
+      {
+        "before_start": 513,
+        "after_start": 580,
+        "before": [],
+        "after": [
+          "        if body_budget is not None:\n",
+          "            body_budget.require_remaining(errors)\n"
+        ]
+      },
+      {
+        "before_start": 515,
+        "after_start": 584,
+        "before": [],
+        "after": [
+          "        if body_budget is not None:\n",
+          "            body_budget.attempts_started += 1\n"
+        ]
+      },
+      {
+        "before_start": 520,
+        "after_start": 591,
+        "before": [
+          "            body = _read_success_body(response, max_body_bytes)\n"
+        ],
+        "after": [
+          "            body_evidence = _read_body_evidence(response, max_body_bytes, body_budget)\n",
+          "            body = body_evidence[\"body\"]\n"
+        ]
+      },
+      {
+        "before_start": 529,
+        "after_start": 601,
+        "before": [
+          "                \"body\": body,\n"
+        ],
+        "after": [
+          "                **body_evidence,\n"
+        ]
+      },
+      {
+        "before_start": 546,
+        "after_start": 618,
+        "before": [],
+        "after": [
+          "    body_budget: HTTPBodyBudget | None = None,\n"
+        ]
+      },
+      {
+        "before_start": 561,
+        "after_start": 634,
+        "before": [],
+        "after": [
+          "                **({\"body_budget\": body_budget} if body_budget is not None else {}),\n"
+        ]
+      },
+      {
+        "before_start": 562,
+        "after_start": 636,
+        "before": [
+          "        except HTTPAttemptBudgetExhausted as exc:\n"
+        ],
+        "after": [
+          "        except (HTTPAttemptBudgetExhausted, HTTPBodyBudgetExhausted) as exc:\n"
+        ]
+      },
+      {
+        "before_start": 564,
+        "after_start": 638,
+        "before": [
+          "                      \"reason\": str(exc), \"reason_code\": \"http_attempt_budget_exhausted\"}\n"
+        ],
+        "after": [
+          "                      \"reason\": str(exc), \"reason_code\": \"http_body_budget_exhausted\" if isinstance(exc, HTTPBodyBudgetExhausted) else \"http_attempt_budget_exhausted\"}\n"
+        ]
+      },
+      {
+        "before_start": 613,
+        "after_start": 687,
+        "before": [],
+        "after": [
+          "            **({key: response[key] for key in (\"reason_code\", \"reason\")} if response.get(\"reason_code\") == \"http_body_budget_exhausted\" else {}),\n"
+        ]
+      },
+      {
+        "before_start": 627,
+        "after_start": 702,
+        "before": [],
+        "after": [
+          "    body_budget: HTTPBodyBudget | None = None,\n"
+        ]
+      },
+      {
+        "before_start": 631,
+        "after_start": 707,
+        "before": [
+          "                                **({\"budget\": budget} if budget is not None else {}))\n"
+        ],
+        "after": [
+          "                                **({\"budget\": budget} if budget is not None else {}),\n",
+          "                                **({\"body_budget\": body_budget} if body_budget is not None else {}))\n"
+        ]
+      },
+      {
+        "before_start": 636,
+        "after_start": 713,
+        "before": [
+          "    body_truncated = len(body) > max_body_bytes\n"
+        ],
+        "after": [
+          "    body_truncated = len(body) > max_body_bytes or result.get(\"reason_code\") == \"http_body_budget_exhausted\"\n"
+        ]
+      },
+      {
+        "before_start": 658,
+        "after_start": 735,
+        "before": [],
+        "after": [
+          "        **({key: result[key] for key in (\"reason_code\", \"reason\")} if result.get(\"reason_code\") == \"http_body_budget_exhausted\" else {}),\n"
+        ]
+      }
+    ]
+  },
+  {
+    "path": "scripts/site_meta_audit.py",
+    "before_sha256": "dd5f6cd6ae01513d1cb71dbbd9d5aea64d46a6225d461f5f55a5ab3078d2ae96",
+    "after_sha256": "838878a8cf4a54406b95a5fae2606742b69fad266712955d029a40c76479fb95",
+    "hunks": [
+      {
+        "before_start": 25,
+        "after_start": 25,
+        "before": [],
+        "after": [
+          "_LIMIT_REASONS = {\"http_attempt_budget_exhausted\", \"http_body_budget_exhausted\"}\n"
+        ]
+      },
+      {
+        "before_start": 164,
+        "after_start": 165,
+        "before": [
+          "def fetch(url: str, timeout: int = 20, *, budget: public_http.HTTPAttemptBudget | None = None) -> dict:\n"
+        ],
+        "after": [
+          "def fetch(url: str, timeout: int = 20, *, budget: public_http.HTTPAttemptBudget | None = None,\n",
+          "          body_budget: public_http.HTTPBodyBudget | None = None) -> dict:\n"
+        ]
+      },
+      {
+        "before_start": 166,
+        "after_start": 168,
+        "before": [
+          "                            **({\"budget\": budget} if budget is not None else {}))\n"
+        ],
+        "after": [
+          "                            **({\"budget\": budget} if budget is not None else {}),\n",
+          "                            **({\"body_budget\": body_budget} if body_budget is not None else {}))\n"
+        ]
+      },
+      {
+        "before_start": 275,
+        "after_start": 278,
+        "before": [
+          "    result[\"present\"] = (None if item.get(\"reason_code\") == \"http_attempt_budget_exhausted\" else present)\n"
+        ],
+        "after": [
+          "    result[\"present\"] = (None if item.get(\"reason_code\") in _LIMIT_REASONS and not present else present)\n"
+        ]
+      },
+      {
+        "before_start": 277,
+        "after_start": 280,
+        "before": [
+          "        result[\"reason\"] = reason\n"
+        ],
+        "after": [
+          "        result[\"reason\"] = (\"Body allowance left resource evidence incomplete; absence is unknown\"\n",
+          "                            if item.get(\"reason_code\") == \"http_body_budget_exhausted\" and item.get(\"status\") == \"ok\"\n",
+          "                            else reason)\n"
+        ]
+      },
+      {
+        "before_start": 361,
+        "after_start": 366,
+        "before": [
+          "def crawl_resource_checks(base_url: str, *, budget: public_http.HTTPAttemptBudget | None = None) -> dict:\n"
+        ],
+        "after": [
+          "def crawl_resource_checks(base_url: str, *, budget: public_http.HTTPAttemptBudget | None = None,\n",
+          "          body_budget: public_http.HTTPBodyBudget | None = None) -> dict:\n"
+        ]
+      },
+      {
+        "before_start": 363,
+        "after_start": 369,
+        "before": [],
+        "after": [
+          "    if body_budget is not None:\n",
+          "        options[\"body_budget\"] = body_budget\n"
+        ]
+      },
+      {
+        "before_start": 381,
+        "after_start": 389,
+        "before": [
+          "        before = budget.attempts_used if budget is not None else 0\n"
+        ],
+        "after": [
+          "        before = budget.attempts_used if budget is not None else body_budget.attempts_started if body_budget is not None else 0\n"
+        ]
+      },
+      {
+        "before_start": 385,
+        "after_start": 393,
+        "before": [
+          "        if item.get(\"reason_code\") != \"http_attempt_budget_exhausted\" or (budget is not None and budget.attempts_used > before):\n"
+        ],
+        "after": [
+          "        after = budget.attempts_used if budget is not None else body_budget.attempts_started if body_budget is not None else 0\n",
+          "        if item.get(\"reason_code\") not in _LIMIT_REASONS or after > before:\n"
+        ]
+      },
+      {
+        "before_start": 388,
+        "after_start": 397,
+        "before": [
+          "    budget_denied = any(item.get(\"reason_code\") == \"http_attempt_budget_exhausted\" for item in robots + sitemap_checks)\n",
+          "    robots_unavailable = budget is not None and any(\n"
+        ],
+        "after": [
+          "    budget_denied = any(item.get(\"reason_code\") in _LIMIT_REASONS for item in robots + sitemap_checks)\n",
+          "    robots_unavailable = (budget is not None or body_budget is not None) and any(\n"
+        ]
+      },
+      {
+        "before_start": 574,
+        "after_start": 583,
+        "before": [
+          "def _execution_result(result: dict, budget: public_http.HTTPAttemptBudget | None) -> dict:\n",
+          "    if budget is None:\n"
+        ],
+        "after": [
+          "def _execution_result(result: dict, budget: public_http.HTTPAttemptBudget | None,\n",
+          "                      body_budget: public_http.HTTPBodyBudget | None = None) -> dict:\n",
+          "    if budget is None and body_budget is None:\n"
+        ]
+      },
+      {
+        "before_start": 582,
+        "after_start": 592,
+        "before": [
+          "            if value.get(\"reason_code\") == \"http_attempt_budget_exhausted\":\n"
+        ],
+        "after": [
+          "            if value.get(\"reason_code\") in _LIMIT_REASONS:\n"
+        ]
+      },
+      {
+        "before_start": 593,
+        "after_start": 603,
+        "before": [
+          "        \"limits\": {\"max_http_attempts\": budget.max_http_attempts},\n",
+          "        \"usage\": {\"http_attempts\": budget.attempts_used},\n"
+        ],
+        "after": [
+          "        \"limits\": {**({\"max_http_attempts\": budget.max_http_attempts} if budget is not None else {}),\n",
+          "                   **({\"max_http_body_bytes\": body_budget.max_http_body_bytes} if body_budget is not None else {})},\n",
+          "        \"usage\": {**({\"http_attempts\": budget.attempts_used} if budget is not None else {}),\n",
+          "                  **({\"http_body_bytes\": body_budget.bytes_used} if body_budget is not None else {})},\n"
+        ]
+      },
+      {
+        "before_start": 600,
+        "after_start": 612,
+        "before": [],
+        "after": [
+          "    if body_budget is not None:\n",
+          "        result[\"execution\"][\"coverage_scope\"] = \"completion describes only collection omitted by the selected allowances, not full audit coverage\"\n",
+          "        result[\"execution\"][\"coverage_exclusions\"] = [\n",
+          "            \"Body bytes count encoded payload exposed by reads, including lookahead and exposed partial failures\",\n",
+          "            \"Physical network traffic, socket buffering, headers, framing and bytes hidden by failed reads are not counted\",\n",
+          "            \"No elapsed-time, decompression, parser-depth or total-memory bound is enforced\",\n",
+          "            \"Unknown robots declarations are not included in known-candidate counts\",\n",
+          "        ]\n"
+        ]
+      },
+      {
+        "before_start": 601,
+        "after_start": 621,
+        "before": [
+          "        result[\"findings\"].append({\"code\": \"http_attempt_budget_exhausted\", \"severity\": \"warning\", \"confidence\": \"Confirmed\",\n",
+          "                                   \"message\": \"HTTP attempt allowance stopped auxiliary collection; unchecked resources are unavailable, not missing.\",\n",
+          "                                   \"evidence\": \"execution.limit_events\"})\n"
+        ],
+        "after": [
+          "        for code in sorted({event[\"reason_code\"] for event in events}):\n",
+          "            message = (\"HTTP attempt allowance stopped auxiliary collection; unchecked resources are unavailable, not missing.\"\n",
+          "                       if code == \"http_attempt_budget_exhausted\" else\n",
+          "                       \"HTTP exposed body-payload byte allowance limited collection; incomplete or unchecked evidence cannot prove absence.\")\n",
+          "            result[\"findings\"].append({\"code\": code, \"severity\": \"warning\", \"confidence\": \"Confirmed\",\n",
+          "                                       \"message\": message, \"evidence\": \"execution.limit_events\"})\n"
+        ]
+      },
+      {
+        "before_start": 615,
+        "after_start": 638,
+        "before": [
+          "def audit(url: str, *, max_http_attempts: int | None = None) -> dict:\n"
+        ],
+        "after": [
+          "def audit(url: str, *, max_http_attempts: int | None = None, max_http_body_bytes: int | None = None) -> dict:\n"
+        ]
+      },
+      {
+        "before_start": 618,
+        "after_start": 641,
+        "before": [],
+        "after": [
+          "    body_budget = public_http.HTTPBodyBudget(max_http_body_bytes) if max_http_body_bytes is not None else None\n",
+          "    if body_budget is not None:\n",
+          "        options[\"body_budget\"] = body_budget\n"
+        ]
+      },
+      {
+        "before_start": 626,
+        "after_start": 652,
+        "before": [
+          "        return _execution_result(result, budget)\n"
+        ],
+        "after": [
+          "        return _execution_result(result, budget, body_budget)\n"
+        ]
+      },
+      {
+        "before_start": 637,
+        "after_start": 663,
+        "before": [
+          "        return _execution_result(result, budget)\n"
+        ],
+        "after": [
+          "        return _execution_result(result, budget, body_budget)\n"
+        ]
+      },
+      {
+        "before_start": 677,
+        "after_start": 703,
+        "before": [
+          "    return _execution_result(result, budget)\n"
+        ],
+        "after": [
+          "    return _execution_result(result, budget, body_budget)\n"
+        ]
+      },
+      {
+        "before_start": 696,
+        "after_start": 722,
+        "before": [],
+        "after": [
+          "    parser.add_argument(\"--max-http-body-bytes\", type=_nonnegative_int, help=\"Optional cumulative encoded payload bytes exposed by HTTP reads, including lookahead/partial reads; not network traffic or bytes hidden by failed reads. 0 starts no fetches.\")\n"
+        ]
+      },
+      {
+        "before_start": 699,
+        "after_start": 726,
+        "before": [
+          "    result = audit(args.url, **({\"max_http_attempts\": args.max_http_attempts} if args.max_http_attempts is not None else {}))\n"
+        ],
+        "after": [
+          "    result = audit(args.url, **({\"max_http_attempts\": args.max_http_attempts} if args.max_http_attempts is not None else {}),\n",
+          "                   **({\"max_http_body_bytes\": args.max_http_body_bytes} if args.max_http_body_bytes is not None else {}))\n"
+        ]
+      }
+    ]
+  }
+]

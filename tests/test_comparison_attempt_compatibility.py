@@ -19,6 +19,31 @@ TARGETS = {
 }
 
 
+def apply_body_fixture(root, *, reverse=False):
+    """Materialize one exact frozen Q5/P07 source pair, only in test scratch."""
+    fixture = json.loads((ROOT / "tests/fixtures/comparison_metadata/q5-no-option.json").read_text())
+    source, target = ("after", "before") if reverse else ("before", "after")
+    for entry in fixture:
+        assert entry["path"] in TARGETS
+        path = root / entry["path"]
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest == entry[target + "_sha256"]:
+            continue
+        assert digest == entry[source + "_sha256"], entry["path"]
+        lines = path.read_text().splitlines(keepends=True)
+        output, consumed = [], 0
+        for hunk in entry["hunks"]:
+            start = hunk[source + "_start"]
+            old, new = hunk[source], hunk[target]
+            assert lines[start:start + len(old)] == old
+            output.extend(lines[consumed:start])
+            output.extend(new)
+            consumed = start + len(old)
+        output.extend(lines[consumed:])
+        path.write_text("".join(output))
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == entry[target + "_sha256"]
+
+
 @contextmanager
 def composed_checkout():
     """Apply the reviewed historical fixture to disposable source, not a branch.
@@ -31,6 +56,13 @@ def composed_checkout():
         root = (Path(directory) / "suite").resolve()
         shutil.copytree(ROOT, root, ignore=shutil.ignore_patterns(
             ".git", "__pycache__", "*.pyc", "build", "dist", "*.egg-info"))
+        # Retain the historical P07 fixture even when the outer checkout has
+        # the exact reviewed Q5 source. This is test materialization, not runtime
+        # recognition: no unsupported or merely similar source is accepted.
+        body_fixture = json.loads((ROOT / "tests/fixtures/comparison_metadata/q5-no-option.json").read_text())
+        if all(hashlib.sha256((root / entry["path"]).read_bytes()).hexdigest()
+               == entry["after_sha256"] for entry in body_fixture):
+            apply_body_fixture(root, reverse=True)
         lines = json.loads((ROOT / "tests/fixtures/comparison_metadata/pr57-no-option.patch.json").read_text())
         index = 0
         while index < len(lines):
@@ -73,7 +105,7 @@ def composed_checkout():
 
 
 class AttemptCompatibilityTests(unittest.TestCase):
-    def run_probe(self, root, script):
+    def run_probe(self, root, script, collector_targets=TARGETS):
         # Prove both producer code and every collector used by the probe come
         # from the disposable tree. Hashes also prevent a false green against
         # an uncomposed classic collector when an editable install is present.
@@ -95,7 +127,7 @@ class AttemptCompatibilityTests(unittest.TestCase):
             "    if module.__name__ in " + repr(source_hashes) + ":",
             "        assert hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest() == " + repr(source_hashes) + "[module.__name__]",
             "for module, relative in ((site, 'scripts/site_meta_audit.py'), (http, 'scripts/public_http.py')):",
-            "    assert hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest() == " + repr(TARGETS) + "[relative]",
+            "    assert hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest() == " + repr(collector_targets) + "[relative]",
             "",
         ])
         result = subprocess.run([sys.executable, "-c", prelude + script], cwd=root,

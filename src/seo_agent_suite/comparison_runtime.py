@@ -37,6 +37,17 @@ _ATTEMPT_SOURCE = {
     "request_via_proxy": "a1e4a0e8515d767cb822d09eb76e5dff923a8cb47dbb438bd359955289481c3c",
     "default_request_headers": _SOURCE["default_request_headers"],
 }
+# Exact reviewed Q5 body-payload variant; only the no-option path is in v1.
+_BODY_SOURCE = {
+    "audit": "92fda58cadd9254a5e0711cb0e78ab3a30050607f2bccaeb85a0fbeebcbc744c",
+    "fetch": "1e423bb8dbc58d806500324eed0913f2f5da8ffe07a4d8af28d9bdcd6512dc5a",
+    "fetch_public_url": "c5317e56e08907d7714c13f5156d4978dbc51c85d655a76f5f6ad74d21f472bc",
+    "follow_public_http": "096d7ec735add92a3d9d9651a5bd36ffef95cd71654b1bc5272615a1791e64fa",
+    "request_public_url_once": "514e304b7113fedf2817dc6a7c976003d53f18d8c5c0b1fa71464ff8b6fc3251",
+    "request_via_proxy": "50304abf9e4eb8b698648fc4bbf46b34c62e5e71e9550f2886777f8babcded34",
+    "default_request_headers": "a2110baf1169353f3a8b2e28264f10b9c1c3999b20a51bcfd5b1762f4ebcb4a5"
+}
+
 # The five lexical checks depend on these actual extraction bindings.
 _EXTRACTION_SOURCE = {
     "MetaParser": "ea0ea762b39c5a275f2e5f395bfa694ffec3f3cb5cdfbaac1c83d3201124fa8d",
@@ -130,9 +141,13 @@ def resolve_site_runtime_policy(module, *, audit_options=_MISSING):
     if audit_options is not _MISSING and (type(audit_options) is not dict or audit_options):
         return policy
     audit = getattr(module, "audit", None)
-    attempt_variant = _known(audit, "audit", _ATTEMPT_SOURCE)
-    sources = _ATTEMPT_SOURCE if attempt_variant else _SOURCE
-    if attempt_variant and (audit_options is _MISSING or _bound_default(audit, "max_http_attempts") is not None):
+    body_variant = _known(audit, "audit", _BODY_SOURCE)
+    attempt_variant = body_variant or _known(audit, "audit", _ATTEMPT_SOURCE)
+    sources = _BODY_SOURCE if body_variant else _ATTEMPT_SOURCE if attempt_variant else _SOURCE
+    audit_limits = ("max_http_attempts", "max_http_body_bytes") if body_variant else ("max_http_attempts",)
+    budgets = ("budget", "body_budget") if body_variant else ("budget",)
+    if attempt_variant and (audit_options is _MISSING
+                            or any(_bound_default(audit, name) is not None for name in audit_limits)):
         return policy
     if not _known(audit, "audit", sources):
         return policy
@@ -152,7 +167,7 @@ def resolve_site_runtime_policy(module, *, audit_options=_MISSING):
     def known(function, name):
         return (_known(function, name, sources)
                 and (not attempt_variant or name == "default_request_headers"
-                     or _bound_default(function, "budget") is None))
+                     or all(_bound_default(function, parameter) is None for parameter in budgets)))
     fetch = audit.__globals__.get("fetch")
     if fetch is not getattr(module, "fetch", None) or not known(fetch, "fetch"):
         return policy
