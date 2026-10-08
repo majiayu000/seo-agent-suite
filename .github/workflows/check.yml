@@ -47,6 +47,7 @@ jobs:
           node-version: "22"
 
       - name: Install browser acceptance prerequisites
+        timeout-minutes: 10
         run: |
           npm install --prefix "$RUNNER_TEMP/seo-browser" --no-audit --no-fund playwright@1.55.0
           "$RUNNER_TEMP/seo-browser/node_modules/.bin/playwright" install --with-deps chromium
