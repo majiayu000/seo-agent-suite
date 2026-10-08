@@ -53,6 +53,36 @@ class HTTPAttemptBudget:
         self.attempts_used += 1
 
 
+class HTTPBodyBudgetExhausted(Exception):
+    """An exposed-payload collection limit, never a retriable failure."""
+
+    def __init__(self, prior_errors: list[str] | None = None):
+        super().__init__("HTTP exposed body-payload byte allowance exhausted")
+        self.prior_errors = list(prior_errors or [])
+
+
+class HTTPBodyBudget:
+    """Count encoded payload exposed by reads, not physical network traffic.
+
+    Socket buffering, framing, and bytes hidden by failed reads are excluded.
+    """
+
+    def __init__(self, max_http_body_bytes: int):
+        if type(max_http_body_bytes) is not int or max_http_body_bytes < 0:
+            raise ValueError("max_http_body_bytes must be a nonnegative integer")
+        self.max_http_body_bytes = max_http_body_bytes
+        self.bytes_used = 0
+        self.attempts_started = 0
+
+    @property
+    def remaining(self) -> int:
+        return self.max_http_body_bytes - self.bytes_used
+
+    def require_remaining(self, prior_errors: list[str] | None = None) -> None:
+        if self.remaining == 0:
+            raise HTTPBodyBudgetExhausted(prior_errors)
+
+
 def validate_public_http_url(url: str) -> tuple[urllib.parse.ParseResult, list[ResolvedEndpoint]]:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
@@ -188,6 +218,33 @@ def _read_success_body(response: http.client.HTTPResponse, max_body_bytes: int) 
         if len(body) < required:
             raise http.client.IncompleteRead(body, required - len(body))
     return body
+
+
+def _read_body_evidence(response: http.client.HTTPResponse, max_body_bytes: int,
+                        body_budget: HTTPBodyBudget | None) -> dict:
+    if body_budget is None:
+        return {"body": _read_success_body(response, max_body_bytes)}
+    # Preserve the header-only treatment of redirect/error responses.
+    if not 200 <= response.status < 300:
+        return {"body": b""}
+    expected = getattr(response, "length", None)
+    known_length = type(expected) is int and expected >= 0
+    amount = min(max_body_bytes, body_budget.remaining)
+    try:
+        body = response.read(amount)
+    except http.client.IncompleteRead as exc:
+        # Only exposed partial payload can be counted; hidden failed-read bytes
+        # are not observable through this API. Never count this partial twice.
+        body_budget.bytes_used += len(exc.partial)
+        raise
+    body_budget.bytes_used += len(body)
+    if known_length and len(body) < min(expected, amount):
+        raise http.client.IncompleteRead(body, min(expected, amount) - len(body))
+    complete = len(body) == expected if known_length else len(body) < amount
+    if not complete and body_budget.remaining == 0:
+        return {"body": body, "reason_code": "http_body_budget_exhausted",
+                "reason": "HTTP exposed body-payload byte allowance reached; response completion is unverified"}
+    return {"body": body}
 
 
 def _response_header_values(response: http.client.HTTPResponse, name: str) -> list[str]:
@@ -426,6 +483,7 @@ def request_via_proxy(
     *,
     max_body_bytes: int,
     budget: HTTPAttemptBudget | None = None,
+    body_budget: HTTPBodyBudget | None = None,
 ) -> dict:
     """Fetch through an HTTP proxy while keeping the already-validated public target."""
     if proxy.hostname is None or parsed.hostname is None:
@@ -443,8 +501,12 @@ def request_via_proxy(
     errors: list[str] = []
 
     for endpoint in endpoints:
+        if body_budget is not None:
+            body_budget.require_remaining(errors)
         if budget is not None:
             budget.charge(errors)
+        if body_budget is not None:
+            body_budget.attempts_started += 1
         endpoint_ip = endpoint[4][0].split("%", 1)[0]
         connection: http.client.HTTPConnection
         try:
@@ -472,7 +534,8 @@ def request_via_proxy(
             try:
                 connection.request("GET", path, headers=headers)
                 response = connection.getresponse()
-                body = _read_success_body(response, max_body_bytes)
+                body_evidence = _read_body_evidence(response, max_body_bytes, body_budget)
+                body = body_evidence["body"]
                 return {
                     "http_status": response.status,
                     "content_type": response.getheader("content-type"),
@@ -481,7 +544,7 @@ def request_via_proxy(
                     "location": response.getheader("location"),
                     "x_robots_tag": _response_header_values(response, "x-robots-tag"),
                     "link_headers": _response_header_values(response, "link"),
-                    "body": body,
+                    **body_evidence,
                 }
             finally:
                 connection.close()
@@ -494,9 +557,12 @@ def request_via_proxy(
 def request_public_url_once(
     url: str, timeout: int, *, max_body_bytes: int = 2048,
     budget: HTTPAttemptBudget | None = None,
+    body_budget: HTTPBodyBudget | None = None,
 ) -> dict:
     if budget is not None and budget.attempts_used >= budget.max_http_attempts:
         raise HTTPAttemptBudgetExhausted()
+    if body_budget is not None:
+        body_budget.require_remaining()
     parsed, endpoints = validate_public_http_url(url)
     port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
     path = urllib.parse.urlunparse(("", "", parsed.path or "/", parsed.params, parsed.query, ""))
@@ -506,19 +572,25 @@ def request_public_url_once(
         return request_via_proxy(
             parsed, path, proxy, endpoints, timeout, max_body_bytes=max_body_bytes,
             **({"budget": budget} if budget is not None else {}),
+            **({"body_budget": body_budget} if body_budget is not None else {}),
         )
 
     errors: list[str] = []
 
     for endpoint in endpoints:
+        if body_budget is not None:
+            body_budget.require_remaining(errors)
         if budget is not None:
             budget.charge(errors)
+        if body_budget is not None:
+            body_budget.attempts_started += 1
         connection_class = PinnedHTTPSConnection if parsed.scheme == "https" else PinnedHTTPConnection
         connection = connection_class(parsed.hostname, port, endpoint, timeout)
         try:
             connection.request("GET", path, headers=default_request_headers())
             response = connection.getresponse()
-            body = _read_success_body(response, max_body_bytes)
+            body_evidence = _read_body_evidence(response, max_body_bytes, body_budget)
+            body = body_evidence["body"]
             return {
                 "http_status": response.status,
                 "content_type": response.getheader("content-type"),
@@ -527,7 +599,7 @@ def request_public_url_once(
                 "location": response.getheader("location"),
                 "x_robots_tag": _response_header_values(response, "x-robots-tag"),
                 "link_headers": _response_header_values(response, "link"),
-                "body": body,
+                **body_evidence,
             }
         except (OSError, http.client.HTTPException) as exc:
             errors.append(str(exc) or type(exc).__name__)
@@ -544,6 +616,7 @@ def follow_public_http(
     max_redirects: int = 5,
     max_body_bytes: int = 2048,
     budget: HTTPAttemptBudget | None = None,
+    body_budget: HTTPBodyBudget | None = None,
 ) -> dict:
     """Fetch a URL with pinned connect and re-validation on every redirect hop."""
     current_url = url
@@ -559,10 +632,11 @@ def follow_public_http(
             response = request_public_url_once(
                 current_url, timeout, max_body_bytes=max_body_bytes,
                 **({"budget": budget} if budget is not None else {}),
+                **({"body_budget": body_budget} if body_budget is not None else {}),
             )
-        except HTTPAttemptBudgetExhausted as exc:
+        except (HTTPAttemptBudgetExhausted, HTTPBodyBudgetExhausted) as exc:
             result = {**evidence, "status": "unavailable", "url": safe_url,
-                      "reason": str(exc), "reason_code": "http_attempt_budget_exhausted"}
+                      "reason": str(exc), "reason_code": "http_body_budget_exhausted" if isinstance(exc, HTTPBodyBudgetExhausted) else "http_attempt_budget_exhausted"}
             if exc.prior_errors:
                 result["endpoint_errors"] = [
                     re.sub(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+",
@@ -611,6 +685,7 @@ def follow_public_http(
             "sample_bytes": response["sample_bytes"],
             "location": redact_url(response["location"]) if response["location"] else response["location"],
             "body": response["body"],
+            **({key: response[key] for key in ("reason_code", "reason")} if response.get("reason_code") == "http_body_budget_exhausted" else {}),
         }
 
     raise AssertionError("redirect loop bound is unreachable")
@@ -625,16 +700,18 @@ def http_check(url: str, timeout: int = 15, *, budget: HTTPAttemptBudget | None 
 def fetch_public_url(
     url: str, timeout: int = DEFAULT_TIMEOUT_SECONDS, *, max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
     budget: HTTPAttemptBudget | None = None,
+    body_budget: HTTPBodyBudget | None = None,
 ) -> dict:
     """Return audit-friendly fetch result with decoded body for successful responses."""
     # Read one extra byte to distinguish a bounded sample from a response at EOF.
     result = follow_public_http(url, timeout=timeout, max_body_bytes=max_body_bytes + 1,
-                                **({"budget": budget} if budget is not None else {}))
+                                **({"budget": budget} if budget is not None else {}),
+                                **({"body_budget": body_budget} if body_budget is not None else {}))
     if result.get("status") != "ok":
         return {key: value for key, value in result.items() if key != "body"}
     content_type = result.get("content_type")
     body = result.get("body") or b""
-    body_truncated = len(body) > max_body_bytes
+    body_truncated = len(body) > max_body_bytes or result.get("reason_code") == "http_body_budget_exhausted"
     body = body[:max_body_bytes]
     charset = charset_from_content_type(content_type)
     if charset is None and (not content_type or content_type.split(";", 1)[0].strip().lower() in {"text/html", "application/xhtml+xml"}):
@@ -656,6 +733,7 @@ def fetch_public_url(
         "redirects": result["redirects"],
         "x_robots_tag": result["x_robots_tag"],
         "link_headers": result["link_headers"],
+        **({key: result[key] for key in ("reason_code", "reason")} if result.get("reason_code") == "http_body_budget_exhausted" else {}),
     }
 
 
