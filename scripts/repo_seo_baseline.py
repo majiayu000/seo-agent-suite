@@ -141,6 +141,8 @@ def read_toml(path: Path, max_input_bytes: int | None = None) -> tuple[dict | No
         return None, {"status": "error", "path": str(path), "reason": str(exc)}
     except tomllib.TOMLDecodeError as exc:
         return None, {"status": "error", "path": str(path), "reason": f"invalid TOML: {exc}"}
+    except (ValueError, RecursionError):
+        return None, {"status": "error", "path": str(path), "reason": "TOML value exceeds supported numeric or nesting limits"}
 
 
 def redact_evidence(value: object) -> object:
