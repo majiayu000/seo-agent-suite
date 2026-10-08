@@ -26,6 +26,33 @@ DEFAULT_MAX_BODY_BYTES = 1_000_000
 DEFAULT_TIMEOUT_SECONDS = 20
 
 
+class HTTPAttemptBudgetExhausted(Exception):
+    """A terminal collection limit, never a retriable transport failure."""
+
+    def __init__(self, prior_errors: list[str] | None = None):
+        super().__init__("HTTP target attempt allowance exhausted")
+        self.prior_errors = list(prior_errors or [])
+
+
+class HTTPAttemptBudget:
+    """Invocation-local allowance for logical direct/proxy target attempts.
+
+    A CONNECT tunnel and its target GET form one attempt. DNS, headers,
+    TLS/proxy framing and requests inside other programs are not counted.
+    """
+
+    def __init__(self, max_http_attempts: int):
+        if type(max_http_attempts) is not int or max_http_attempts < 0:
+            raise ValueError("max_http_attempts must be a nonnegative integer")
+        self.max_http_attempts = max_http_attempts
+        self.attempts_used = 0
+
+    def charge(self, prior_errors: list[str] | None = None) -> None:
+        if self.attempts_used >= self.max_http_attempts:
+            raise HTTPAttemptBudgetExhausted(prior_errors)
+        self.attempts_used += 1
+
+
 def validate_public_http_url(url: str) -> tuple[urllib.parse.ParseResult, list[ResolvedEndpoint]]:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
@@ -398,6 +425,7 @@ def request_via_proxy(
     timeout: int,
     *,
     max_body_bytes: int,
+    budget: HTTPAttemptBudget | None = None,
 ) -> dict:
     """Fetch through an HTTP proxy while keeping the already-validated public target."""
     if proxy.hostname is None or parsed.hostname is None:
@@ -415,6 +443,8 @@ def request_via_proxy(
     errors: list[str] = []
 
     for endpoint in endpoints:
+        if budget is not None:
+            budget.charge(errors)
         endpoint_ip = endpoint[4][0].split("%", 1)[0]
         connection: http.client.HTTPConnection
         try:
@@ -461,7 +491,12 @@ def request_via_proxy(
     raise OSError("; ".join(errors) or "proxied connection failed")
 
 
-def request_public_url_once(url: str, timeout: int, *, max_body_bytes: int = 2048) -> dict:
+def request_public_url_once(
+    url: str, timeout: int, *, max_body_bytes: int = 2048,
+    budget: HTTPAttemptBudget | None = None,
+) -> dict:
+    if budget is not None and budget.attempts_used >= budget.max_http_attempts:
+        raise HTTPAttemptBudgetExhausted()
     parsed, endpoints = validate_public_http_url(url)
     port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
     path = urllib.parse.urlunparse(("", "", parsed.path or "/", parsed.params, parsed.query, ""))
@@ -469,12 +504,15 @@ def request_public_url_once(url: str, timeout: int, *, max_body_bytes: int = 204
     proxy = select_proxy(parsed)
     if proxy is not None:
         return request_via_proxy(
-            parsed, path, proxy, endpoints, timeout, max_body_bytes=max_body_bytes
+            parsed, path, proxy, endpoints, timeout, max_body_bytes=max_body_bytes,
+            **({"budget": budget} if budget is not None else {}),
         )
 
     errors: list[str] = []
 
     for endpoint in endpoints:
+        if budget is not None:
+            budget.charge(errors)
         connection_class = PinnedHTTPSConnection if parsed.scheme == "https" else PinnedHTTPConnection
         connection = connection_class(parsed.hostname, port, endpoint, timeout)
         try:
@@ -505,6 +543,7 @@ def follow_public_http(
     *,
     max_redirects: int = 5,
     max_body_bytes: int = 2048,
+    budget: HTTPAttemptBudget | None = None,
 ) -> dict:
     """Fetch a URL with pinned connect and re-validation on every redirect hop."""
     current_url = url
@@ -517,7 +556,20 @@ def follow_public_http(
     for redirect_count in range(max_redirects + 1):
         safe_url = redact_url(current_url)
         try:
-            response = request_public_url_once(current_url, timeout, max_body_bytes=max_body_bytes)
+            response = request_public_url_once(
+                current_url, timeout, max_body_bytes=max_body_bytes,
+                **({"budget": budget} if budget is not None else {}),
+            )
+        except HTTPAttemptBudgetExhausted as exc:
+            result = {**evidence, "status": "unavailable", "url": safe_url,
+                      "reason": str(exc), "reason_code": "http_attempt_budget_exhausted"}
+            if exc.prior_errors:
+                result["endpoint_errors"] = [
+                    re.sub(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+",
+                           lambda match: redact_url(match.group()), error)
+                    for error in exc.prior_errors
+                ]
+            return result
         except ValueError as exc:
             prefix = "redirect blocked: " if current_url != url else ""
             return {**evidence, "status": "error", "url": safe_url, "reason": f"{prefix}{exc}"}
@@ -564,15 +616,20 @@ def follow_public_http(
     raise AssertionError("redirect loop bound is unreachable")
 
 
-def http_check(url: str, timeout: int = 15) -> dict:
-    result = follow_public_http(url, timeout=timeout, max_body_bytes=2048)
+def http_check(url: str, timeout: int = 15, *, budget: HTTPAttemptBudget | None = None) -> dict:
+    result = follow_public_http(url, timeout=timeout, max_body_bytes=2048,
+                                **({"budget": budget} if budget is not None else {}))
     return {key: value for key, value in result.items() if key != "body"}
 
 
-def fetch_public_url(url: str, timeout: int = DEFAULT_TIMEOUT_SECONDS, *, max_body_bytes: int = DEFAULT_MAX_BODY_BYTES) -> dict:
+def fetch_public_url(
+    url: str, timeout: int = DEFAULT_TIMEOUT_SECONDS, *, max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
+    budget: HTTPAttemptBudget | None = None,
+) -> dict:
     """Return audit-friendly fetch result with decoded body for successful responses."""
     # Read one extra byte to distinguish a bounded sample from a response at EOF.
-    result = follow_public_http(url, timeout=timeout, max_body_bytes=max_body_bytes + 1)
+    result = follow_public_http(url, timeout=timeout, max_body_bytes=max_body_bytes + 1,
+                                **({"budget": budget} if budget is not None else {}))
     if result.get("status") != "ok":
         return {key: value for key, value in result.items() if key != "body"}
     content_type = result.get("content_type")
