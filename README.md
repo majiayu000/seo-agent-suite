@@ -143,10 +143,26 @@ See [the metadata contract](references/comparison-metadata.md) and
 dependency-free `validate_site_comparison_metadata(report)` checks containing
 evidence and contract consistency beyond schema shape. Original invocation
 URL and runtime policy may be supplied to verify those production inputs;
-stored metadata is not a historical attestation. There is no comparator or
-history database yet. Future resolution may mean only a passing lexical check
-in a new, fully comparable capture, never proof of deployment, indexing,
-ranking, or all SEO issues being fixed.
+stored metadata is not a historical attestation.
+
+### Offline report comparison
+
+```bash
+seo-agent compare BEFORE.json AFTER.json --json
+```
+
+Compare exactly two recorded reports offline using the five-rule metadata
+contract. Complete compatible captures yield new/persistent/resolved checks
+and an unchanged-passing count. Legacy reports, repository reports, unknown or
+truncated evidence, and changed target/scope/version are pair-wide incomparable.
+Resolved means only a passing lexical check in the recorded capture, never
+proof of deployment, indexing, ranking, or all SEO issues being fixed.
+
+Inputs are regular UTF-8 JSON files, at most 8 MiB each and 64 nested containers;
+duplicate keys and nonfinite numbers are rejected. Exit 0 means comparable
+regardless of severity, 1 means incomparable, and 2 means malformed/unreadable
+or over-budget input. No network, providers, history database, new MCP tool,
+or file writes. See [input, API and output details](references/offline-comparison.md).
 
 ### Optional MCP
 

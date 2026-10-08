@@ -2,14 +2,19 @@
 
 ## Unreleased
 
+- Add offline `seo-agent compare BEFORE.json AFTER.json --json` and a pure
+  bytes API for the five recorded page-presence checks. Whole-pair eligibility
+  prevents resolution from incomplete or incompatible evidence; explicit input
+  bounds, raw-byte digests and evidence pointers support repeatable review.
+  Exit 0/1/2 means comparable/incomparable/invalid input, not a severity gate.
+
 - Add comparison metadata v1 only to new packaged `site-meta` reports (also
   the existing MCP wrapper): exact requested/effective page identity, five
   lexical presence rules, verified runtime policy and a complete result ledger.
   This is an additive field on the observed-open 1.0 envelope; consumers that
   reject unknown top-level fields must explicitly accommodate `comparison`.
   Legacy scripts, report findings/status/exits, and repository reports retain
-  their existing behavior. No baseline comparator, history store or release
-  is included.
+  their existing behavior. This metadata addition itself introduces no history store or release.
 
 - Package the suite as installable `seo-agent-suite` (`pip install -e .`) with
   console script `seo-agent` (`repo-baseline`, `site-meta`, `doctor`, `version`,
