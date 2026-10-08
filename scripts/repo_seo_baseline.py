@@ -191,6 +191,23 @@ def registry_name_error(name: object, registry: str, path: str) -> dict | None:
     return {"status": "error", "path": path, "reason": f"invalid {registry} package name"}
 
 
+def validate_toml_evidence(manifest: dict, table: str, errors: list[dict]) -> None:
+    """Reject unsupported exported values without discarding valid sibling fields."""
+    for field, value in list(manifest.items()):
+        try:
+            json.dumps(value, allow_nan=False)
+        except (TypeError, ValueError, RecursionError) as exc:
+            detail = (
+                "contains a TOML date/time value" if isinstance(exc, TypeError)
+                else "contains a non-finite number" if isinstance(exc, ValueError)
+                else "exceeds supported nesting limits"
+            )
+            reason = f"{table}.{field} {detail}"
+            errors.append({"status": "error", "path": manifest["path"], "reason": reason})
+            manifest[field] = None
+            manifest.update({"status": "error", "reason": reason})
+
+
 def collect_manifests(root: Path) -> dict:
     manifests: dict[str, object] = {"npm": [], "cargo": None, "python": None, "errors": []}
 
@@ -250,6 +267,7 @@ def collect_manifests(root: Path) -> dict:
             if name_error:
                 manifests["errors"].append(name_error)
                 manifests["cargo"].update({"status": "error", "reason": name_error["reason"]})
+            validate_toml_evidence(manifests["cargo"], "package", manifests["errors"])
 
     workspace = cargo_data.get("workspace") if cargo_data else None
     if isinstance(workspace, dict) and (workspace.get("members") or cargo_data.get("package")):
@@ -301,8 +319,40 @@ def collect_manifests(root: Path) -> dict:
                 "urls": project.get("urls"),
                 "keywords": project.get("keywords"),
             }
+            validate_toml_evidence(manifests["python"], "project", manifests["errors"])
 
     return manifests
+
+
+def first_readme_heading(lines: list[str]) -> str | None:
+    """Return stripped ATX source outside top-level fenced code.
+
+    This bounded lexical check handles 0–3-space indentation, ATX levels 1–6,
+    and backtick/tilde fences. It does not parse containers, Setext headings,
+    HTML blocks, or inline Markdown, and preserves the original heading text.
+    """
+    fence_character = None
+    fence_length = 0
+    for line in lines:
+        fence = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if fence_character is not None:
+            if (
+                fence
+                and fence.group(1)[0] == fence_character
+                and len(fence.group(1)) >= fence_length
+                and not fence.group(2).strip(" \t")
+            ):
+                fence_character = None
+            continue
+        if fence:
+            marker, info = fence.groups()
+            if marker[0] == "~" or "`" not in info:
+                fence_character = marker[0]
+                fence_length = len(marker)
+                continue
+        if re.match(r"^ {0,3}#{1,6}(?:[ \t]|$)", line):
+            return line.strip()
+    return None
 
 
 def collect_readmes(root: Path) -> list[dict]:
@@ -322,7 +372,7 @@ def collect_readmes(root: Path) -> list[dict]:
             {
                 "path": str(path.relative_to(root)),
                 "line_count": len(lines),
-                "first_heading": next((line for line in non_empty if line.startswith("#")), None),
+                "first_heading": first_readme_heading(lines),
                 "first_non_empty": non_empty[0] if non_empty else None,
             }
         )
@@ -663,6 +713,18 @@ def crate_registry_check(name: str, local_version: object = None) -> dict:
     return result
 
 
+def _enrich_repo_evidence(evidence: dict) -> dict:
+    """Attach Report Envelope fields; works from checkout without install."""
+    try:
+        from seo_agent_suite.report import enrich_repo_evidence
+    except ImportError:
+        src = Path(__file__).resolve().parents[1] / "src"
+        if str(src) not in sys.path:
+            sys.path.insert(0, str(src))
+        from seo_agent_suite.report import enrich_repo_evidence
+    return enrich_repo_evidence(evidence)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Collect repo/package SEO baseline evidence.")
     parser.add_argument("--root", default=".", help="Repository root to inspect.")
@@ -670,7 +732,7 @@ def main() -> int:
     parser.add_argument("--npm", action="append", default=[], help="npm package name to verify. Can be repeated.")
     parser.add_argument("--crate", action="append", default=[], help="crates.io package name to verify. Can be repeated.")
     parser.add_argument("--project-yaml", help="Shipwise project.yaml to validate against discoverability checks.")
-    parser.add_argument("--json", action="store_true", help="Emit JSON output.")
+    parser.add_argument("--json", action="store_true", help="Emit JSON Report Envelope.")
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
@@ -760,6 +822,7 @@ def main() -> int:
     errors = collect_errors(evidence)
     evidence["status"] = "error" if errors else "ok"
     evidence["errors"] = errors
+    evidence = _enrich_repo_evidence(evidence)
 
     if args.json:
         print(json.dumps(evidence, indent=2, sort_keys=True))
@@ -769,11 +832,12 @@ def main() -> int:
         print(f"crates: {', '.join(crate_names) or 'none'}")
         print(f"homepages: {', '.join(site) or 'none'}")
         sys.stdout.write(f"status: {evidence['status']}\n")
+        sys.stdout.write(f"findings: {len(evidence.get('findings') or [])}\n")
         if errors:
             sys.stdout.write("errors:\n")
             for item in errors:
                 sys.stdout.write(f"- {item.get('surface')}: {item.get('reason')}\n")
-        print("Run with --json for full evidence.")
+        print("Run with --json for full evidence + findings.")
 
     return 1 if errors else 0
 

@@ -43,11 +43,16 @@ def parse_frontmatter(path: Path) -> dict[str, str]:
 
 
 def main() -> int:
+    require(ROOT / "pyproject.toml")
+    require(ROOT / "src" / "seo_agent_suite" / "__init__.py")
+
     plugin_json = ROOT / ".codex-plugin" / "plugin.json"
     require(plugin_json)
     payload = json.loads(plugin_json.read_text(encoding="utf-8"))
     if payload.get("name") != "seo-agent-suite":
         fail("plugin name must be seo-agent-suite")
+    if payload.get("version") != "0.2.0":
+        fail("plugin version must be 0.2.0")
     if payload.get("skills") != "./skills/":
         fail("plugin skills path must be ./skills/")
 

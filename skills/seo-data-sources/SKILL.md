@@ -1,6 +1,6 @@
 ---
 name: seo-data-sources
-description: Choose and document SEO data sources and MCP/provider boundaries for audits. Use when Codex needs to decide between local scripts, Firecrawl, Google Search Console, PageSpeed Insights, CrUX, DataForSEO, SE Ranking, Ahrefs, browser checks, or paid/live integrations; or when SEO findings require explicit source, cost, account, API-key, and confidence boundaries.
+description: Choose and document SEO data sources and MCP/provider boundaries for audits. Use when an agent needs to decide between local scripts, Firecrawl, Google Search Console, PageSpeed Insights, CrUX, DataForSEO, SE Ranking, Ahrefs, browser checks, or paid/live integrations; or when SEO findings require explicit source, cost, account, API-key, and confidence boundaries.
 ---
 
 # SEO Data Sources

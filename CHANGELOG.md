@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Package the suite as installable `seo-agent-suite` (`pip install -e .`) with
+  console script `seo-agent` (`repo-baseline`, `site-meta`, `doctor`, `version`,
+  optional `mcp`).
+- Add Report Envelope fields to JSON output: `schema_version`, `tool_version`,
+  `target`, and `findings[]` (severity / confidence / surface / evidence /
+  action). Legacy evidence fields are preserved.
+- Add optional MCP server (`pip install 'seo-agent-suite[mcp]'` then
+  `seo-agent mcp`) exposing `repo_baseline`, `site_meta`, and `doctor`.
+- Identify public fetches as `seo-agent-suite/0.2.0` and add a small
+  `robots_path_allowed` helper (not a sitewide crawler).
+- Clarify multi-runtime use (Codex / Cursor / Claude Code / MCP) and mark
+  Shipwise as an optional adapter.
+
 - Recover raw H1 text once across heading boundaries and EOF without stale-buffer
   duplicates; retain the collector's lexical, non-DOM scope.
 - Decode single-line YAML double-quoted escapes into Unicode values and reject

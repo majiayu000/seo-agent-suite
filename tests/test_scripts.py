@@ -1173,7 +1173,7 @@ discoverability:
         connection.request.assert_called_once_with(
             "GET",
             "/page;variant=mobile?q=1",
-            headers={"User-Agent": "github-repo-seo-skill/1.0"},
+            headers=module.default_request_headers(),
         )
         connection.close.assert_called_once()
 
@@ -1227,7 +1227,7 @@ discoverability:
         connection.request.assert_called_once_with(
             "GET",
             "/page;variant?q=1",
-            headers={"User-Agent": "github-repo-seo-skill/1.0", "Host": "example.com"},
+            headers=module.default_request_headers(host="example.com"),
         )
         self.assertEqual(result["http_status"], 200)
         connection.close.assert_called_once()
@@ -1267,7 +1267,7 @@ discoverability:
         connection.request.assert_called_once_with(
             "GET",
             "/secure",
-            headers={"User-Agent": "github-repo-seo-skill/1.0", "Host": "example.com"},
+            headers=module.default_request_headers(host="example.com"),
         )
         self.assertEqual(result["http_status"], 200)
         connection.close.assert_called_once()
