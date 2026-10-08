@@ -154,6 +154,55 @@ def cmd_site_meta(args: argparse.Namespace) -> int:
     return 0 if page.get("status") == "ok" else 1
 
 
+def cmd_compare(args: argparse.Namespace) -> int:
+    """Read exactly two regular files; never invoke a collector or provider."""
+    import os
+    import stat
+
+    from seo_agent_suite.compare import (
+        EXIT_CODES, MAX_INPUT_BYTES, compare_reports, invalid_input_result,
+    )
+
+    inputs = []
+    result = None
+    for side in ("before", "after"):
+        fd = None
+        try:
+            path = getattr(args, side)
+            if path == "-":
+                result = invalid_input_result(side, "stdin_not_supported")
+                break
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                result = invalid_input_result(side, "expected_regular_file")
+                break
+            with os.fdopen(fd, "rb") as stream:
+                fd = None
+                data = stream.read(MAX_INPUT_BYTES + 1)
+            inputs.append(data)
+        except (OSError, ValueError):
+            result = invalid_input_result(side, "unreadable_file")
+            break
+        finally:
+            if fd is not None:
+                os.close(fd)
+    if result is None:
+        result = compare_reports(*inputs)
+    if args.json:
+        _print_json(result)
+    else:
+        print(f"comparison: {result['status']}")
+        print("Scope: five recorded raw-HTML presence checks; resources excluded.")
+        if result["counts"] is not None:
+            for key, count in result["counts"].items():
+                print(f"{key}: {count}")
+            print("Resolved means passed in this capture, not deployed or indexed.")
+        else:
+            for reason in result["reasons"]:
+                print(f"{reason['input']}: {reason['code']}")
+    return EXIT_CODES[result["status"]]
+
+
 def cmd_mcp(_: argparse.Namespace) -> int:
     try:
         from seo_agent_suite.mcp_server import build_server
@@ -211,6 +260,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_site.add_argument("url", help="Public http(s) URL to inspect.")
     p_site.add_argument("--json", action="store_true", help="Emit JSON Report Envelope.")
     p_site.set_defaults(func=cmd_site_meta)
+
+    p_compare = sub.add_parser("compare", help="Compare two recorded reports offline.")
+    p_compare.add_argument("before", help="Before report: regular UTF-8 JSON file, max 8 MiB.")
+    p_compare.add_argument("after", help="After report: regular UTF-8 JSON file, max 8 MiB.")
+    p_compare.add_argument("--json", action="store_true", help="Emit JSON comparison result.")
+    p_compare.set_defaults(func=cmd_compare)
 
     p_mcp = sub.add_parser(
         "mcp",
