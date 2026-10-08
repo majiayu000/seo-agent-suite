@@ -23,6 +23,7 @@ from public_http import fetch_public_url, redact_url  # noqa: E402
 _MAX_SITEMAP_CANDIDATES = 10
 _CRAWLERS = ("Googlebot", "OAI-SearchBot", "GPTBot")
 _SEVERITY = {"info": 0, "warning": 1, "error": 2}
+_LIMIT_REASONS = {"http_attempt_budget_exhausted", "http_body_budget_exhausted"}
 
 
 class MetaParser(HTMLParser):
@@ -162,9 +163,11 @@ def json_ld_evidence(body: str) -> dict:
     return evidence
 
 
-def fetch(url: str, timeout: int = 20, *, budget: public_http.HTTPAttemptBudget | None = None) -> dict:
+def fetch(url: str, timeout: int = 20, *, budget: public_http.HTTPAttemptBudget | None = None,
+          body_budget: public_http.HTTPBodyBudget | None = None) -> dict:
     return fetch_public_url(url, timeout=timeout,
-                            **({"budget": budget} if budget is not None else {}))
+                            **({"budget": budget} if budget is not None else {}),
+                            **({"body_budget": body_budget} if body_budget is not None else {}))
 
 
 def first_meta(parser: MetaParser, key: str, value: str) -> str | None:
@@ -273,9 +276,11 @@ def resource_check(item: dict, filename: str) -> dict:
     evidence = sitemap_evidence(item) if filename == "sitemap.xml" and item.get("http_status") == 200 else None
     present, reason = resource_present(item, filename, evidence)
     result = {key: value for key, value in item.items() if key != "body"}
-    result["present"] = (None if item.get("reason_code") == "http_attempt_budget_exhausted" else present)
+    result["present"] = (None if item.get("reason_code") in _LIMIT_REASONS and not present else present)
     if reason:
-        result["reason"] = reason
+        result["reason"] = ("Body allowance left resource evidence incomplete; absence is unknown"
+                            if item.get("reason_code") == "http_body_budget_exhausted" and item.get("status") == "ok"
+                            else reason)
     if item.get("status") == "ok" and encoded_resource(item):
         result["observation"] = "unsupported_encoding"
     if filename == "robots.txt" and item.get("http_status") in {404, 410}:
@@ -359,8 +364,11 @@ def robots_access(item: dict, url: str) -> dict:
     return output
 
 
-def crawl_resource_checks(base_url: str, *, budget: public_http.HTTPAttemptBudget | None = None) -> dict:
+def crawl_resource_checks(base_url: str, *, budget: public_http.HTTPAttemptBudget | None = None,
+          body_budget: public_http.HTTPBodyBudget | None = None) -> dict:
     options = {"budget": budget} if budget is not None else {}
+    if body_budget is not None:
+        options["body_budget"] = body_budget
     robots = [fetch(candidate, **options) for candidate in resource_candidates(base_url, "robots.txt")]
     declarations = []
     for item in robots:
@@ -379,15 +387,16 @@ def crawl_resource_checks(base_url: str, *, budget: public_http.HTTPAttemptBudge
     sitemap_checks = []
     checked_count = 0
     for candidate in checked:
-        before = budget.attempts_used if budget is not None else 0
+        before = budget.attempts_used if budget is not None else body_budget.attempts_started if body_budget is not None else 0
         item = fetch(candidate, **options)
         # A refused, never-started candidate is unavailable, not checked. A
         # started redirect/fallback chain remains counted with its evidence.
-        if item.get("reason_code") != "http_attempt_budget_exhausted" or (budget is not None and budget.attempts_used > before):
+        after = budget.attempts_used if budget is not None else body_budget.attempts_started if body_budget is not None else 0
+        if item.get("reason_code") not in _LIMIT_REASONS or after > before:
             checked_count += 1
         sitemap_checks.append(resource_check(item, "sitemap.xml"))
-    budget_denied = any(item.get("reason_code") == "http_attempt_budget_exhausted" for item in robots + sitemap_checks)
-    robots_unavailable = budget is not None and any(
+    budget_denied = any(item.get("reason_code") in _LIMIT_REASONS for item in robots + sitemap_checks)
+    robots_unavailable = (budget is not None or body_budget is not None) and any(
         item.get("status") != "ok" and item.get("http_status") not in {404, 410} for item in robots
     )
     return {
@@ -572,15 +581,16 @@ def assess(result: dict, parser: MetaParser | None, resources: dict | None) -> N
         add("h1_review", "info", "Review the observed heading hierarchy in context; H1 count alone is not an indexing failure.", "h1", "Likely")
 
 
-def _execution_result(result: dict, budget: public_http.HTTPAttemptBudget | None) -> dict:
-    if budget is None:
+def _execution_result(result: dict, budget: public_http.HTTPAttemptBudget | None,
+                      body_budget: public_http.HTTPBodyBudget | None = None) -> dict:
+    if budget is None and body_budget is None:
         return result
     events = []
     substantive = False
     def inspect(value: object, path: str) -> None:
         nonlocal substantive
         if isinstance(value, dict):
-            if value.get("reason_code") == "http_attempt_budget_exhausted":
+            if value.get("reason_code") in _LIMIT_REASONS:
                 events.append({"reason_code": value["reason_code"], "stage": "page" if path == "page" else "crawl_resources", "evidence": path})
             if value.get("http_status") is not None or value.get("redirects") or value.get("endpoint_errors") or value.get("status") == "error":
                 substantive = True
@@ -591,17 +601,30 @@ def _execution_result(result: dict, budget: public_http.HTTPAttemptBudget | None
                 inspect(child, f"{path}[{index}]")
     inspect(result, "")
     result["execution"] = {
-        "limits": {"max_http_attempts": budget.max_http_attempts},
-        "usage": {"http_attempts": budget.attempts_used},
+        "limits": {**({"max_http_attempts": budget.max_http_attempts} if budget is not None else {}),
+                   **({"max_http_body_bytes": body_budget.max_http_body_bytes} if body_budget is not None else {})},
+        "usage": {**({"http_attempts": budget.attempts_used} if budget is not None else {}),
+                  **({"http_body_bytes": body_budget.bytes_used} if body_budget is not None else {})},
         "completion": "complete" if not events else "partial" if substantive else "blocked",
         "limit_events": events,
         "coverage_scope": "completion describes only collection omitted by this attempt allowance, not full audit coverage",
         "coverage_exclusions": ["DNS, HTTP headers, TLS/proxy framing and subprocess requests are not counted", "No elapsed-time or response-byte allowance is enforced", "Unknown robots declarations are not included in known-candidate counts"],
     }
+    if body_budget is not None:
+        result["execution"]["coverage_scope"] = "completion describes only collection omitted by the selected allowances, not full audit coverage"
+        result["execution"]["coverage_exclusions"] = [
+            "Body bytes count encoded payload exposed by reads, including lookahead and exposed partial failures",
+            "Physical network traffic, socket buffering, headers, framing and bytes hidden by failed reads are not counted",
+            "No elapsed-time, decompression, parser-depth or total-memory bound is enforced",
+            "Unknown robots declarations are not included in known-candidate counts",
+        ]
     if events and result["page"].get("status") == "ok":
-        result["findings"].append({"code": "http_attempt_budget_exhausted", "severity": "warning", "confidence": "Confirmed",
-                                   "message": "HTTP attempt allowance stopped auxiliary collection; unchecked resources are unavailable, not missing.",
-                                   "evidence": "execution.limit_events"})
+        for code in sorted({event["reason_code"] for event in events}):
+            message = ("HTTP attempt allowance stopped auxiliary collection; unchecked resources are unavailable, not missing."
+                       if code == "http_attempt_budget_exhausted" else
+                       "HTTP exposed body-payload byte allowance limited collection; incomplete or unchecked evidence cannot prove absence.")
+            result["findings"].append({"code": code, "severity": "warning", "confidence": "Confirmed",
+                                       "message": message, "evidence": "execution.limit_events"})
     return result
 
 
@@ -613,9 +636,12 @@ def _resource_presence(items: list[dict]) -> bool | None:
     return False
 
 
-def audit(url: str, *, max_http_attempts: int | None = None) -> dict:
+def audit(url: str, *, max_http_attempts: int | None = None, max_http_body_bytes: int | None = None) -> dict:
     budget = public_http.HTTPAttemptBudget(max_http_attempts) if max_http_attempts is not None else None
     options = {"budget": budget} if budget is not None else {}
+    body_budget = public_http.HTTPBodyBudget(max_http_body_bytes) if max_http_body_bytes is not None else None
+    if body_budget is not None:
+        options["body_budget"] = body_budget
     collected_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     page = fetch(url, **options)
     result = {"url": redact_url(url), "collected_at": collected_at,
@@ -624,7 +650,7 @@ def audit(url: str, *, max_http_attempts: int | None = None) -> dict:
     if page.get("status") != "ok":
         result["findings"].append({"code": "page_fetch_error", "severity": "error", "confidence": "Confirmed",
                                    "message": "Page fetch failed; metadata assessment is unavailable.", "evidence": "page"})
-        return _execution_result(result, budget)
+        return _execution_result(result, budget, body_budget)
 
     media_type = str(page.get("content_type") or "").split(";", 1)[0].strip().lower()
     encoded = encoded_resource(page)
@@ -635,7 +661,7 @@ def audit(url: str, *, max_http_attempts: int | None = None) -> dict:
                                    "message": f"HTML metadata checks were skipped ({reason}); no missing-metadata verdict is made.",
                                    "evidence": "page"})
         assess(result, None, None)
-        return _execution_result(result, budget)
+        return _execution_result(result, budget, body_budget)
 
     parser = MetaParser()
     parser.feed(page["body"])
@@ -675,7 +701,7 @@ def audit(url: str, *, max_http_attempts: int | None = None) -> dict:
         }
     )
     assess(result, parser, resources)
-    return _execution_result(result, budget)
+    return _execution_result(result, budget, body_budget)
 
 
 def _nonnegative_int(value: str) -> int:
@@ -694,10 +720,12 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="Emit JSON output.")
     parser.add_argument("--fail-on", choices=tuple(_SEVERITY), help="Exit 1 for findings at this severity or higher; default only fails on page fetch errors.")
     parser.add_argument("--max-http-attempts", type=_nonnegative_int, help="Optional logical target-attempt allowance shared across this audit; 0 starts no HTTP attempts.")
+    parser.add_argument("--max-http-body-bytes", type=_nonnegative_int, help="Optional cumulative encoded payload bytes exposed by HTTP reads, including lookahead/partial reads; not network traffic or bytes hidden by failed reads. 0 starts no fetches.")
     args = parser.parse_args()
     # Leave URL/DNS validation to audit→fetch so --json always emits structured
     # page errors (exit 1) instead of argparse usage text (exit 2) on resolution failures.
-    result = audit(args.url, **({"max_http_attempts": args.max_http_attempts} if args.max_http_attempts is not None else {}))
+    result = audit(args.url, **({"max_http_attempts": args.max_http_attempts} if args.max_http_attempts is not None else {}),
+                   **({"max_http_body_bytes": args.max_http_body_bytes} if args.max_http_body_bytes is not None else {}))
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:

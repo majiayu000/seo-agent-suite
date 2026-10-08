@@ -57,6 +57,36 @@ This is not a total-memory, parser-depth, elapsed-time, subprocess-output, or
 network limit. Discovery and path/symlink behavior are unchanged. The packaged
 `seo-agent`/MCP interface does not forward this direct-script option yet.
 
+### Optional direct-site payload allowance
+
+`python3 scripts/site_meta_audit.py URL --max-http-body-bytes N --json`
+sets one nonnegative allowance across the page, robots, sitemap candidates and
+endpoint fallbacks. It counts **encoded response-body payload bytes exposed by
+HTTP reads**, before text decoding, including discarded sample lookahead and
+exposed partial-failure bytes. This is **not a physical bandwidth limit**:
+headers, HTTP/TLS/proxy framing, socket buffering and bytes hidden inside failed
+reads are excluded. Redirect/error bodies remain unread and cost zero.
+
+Omitting the option preserves existing behavior. `0`, or an exhausted allowance,
+refuses the next fetch before DNS/transport. Empty responses encountered while
+allowance remains cost zero; zero does not start header-only probes. Each read
+is bounded by the remaining allowance, with no global N+1 probe. The existing
+per-response sample cap still applies. A fully read declared Content-Length can
+prove completion at the exact boundary; unknown-length/chunked responses that
+merely fill the allowance remain incomplete, even if their prefix looks valid.
+
+Opt-in `execution` reports limits, exposed-byte usage and limit events; its
+completion describes only collection omitted by selected allowances. Observed
+positive page/resource evidence is retained, while incomplete or unchecked
+resources cannot prove absence. Default exits remain page-fetch-based: page
+success with limited body/auxiliary evidence returns 0; a refused page fetch
+returns 1. The existing `--fail-on` can gate limit warnings. Invalid limits return
+2. This option can be combined with direct-script `--max-http-attempts`.
+
+No elapsed-time, decompression, parser-depth or total-memory bound is promised.
+The repository collector and packaged `seo-agent`/MCP interfaces do not forward
+this option. It is a bounded single-page collection feature, not a crawler.
+
 ### Report Envelope
 
 CLI JSON output includes a stable envelope **in addition to** legacy evidence fields:
