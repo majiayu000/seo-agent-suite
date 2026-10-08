@@ -44,6 +44,19 @@ python3 scripts/repo_seo_baseline.py --root /path/to/target-repo --json
 python3 scripts/site_meta_audit.py https://example.com/ --json
 ```
 
+For an optional per-file admission limit, add `--max-input-bytes N` to the direct
+script command. `N` is a nonnegative byte count; `0` rejects every nonempty input,
+and omitting it preserves the existing unlimited read policy. It covers only
+files directly read by the collector: JSON manifests, root Cargo/Python TOML,
+README candidates, and the selected Shipwise YAML. Oversized inputs are rejected
+before decoding/parsing (at most one extra byte is read to detect overflow),
+reported as collection errors, and make `--json` exit 1 while preserving valid
+sibling evidence. No truncated prefix is treated as a complete document.
+
+This is not a total-memory, parser-depth, elapsed-time, subprocess-output, or
+network limit. Discovery and path/symlink behavior are unchanged. The packaged
+`seo-agent`/MCP interface does not forward this direct-script option yet.
+
 ### Report Envelope
 
 CLI JSON output includes a stable envelope **in addition to** legacy evidence fields:

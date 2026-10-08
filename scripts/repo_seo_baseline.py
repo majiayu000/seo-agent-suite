@@ -72,13 +72,49 @@ def finite_json_number(value: str) -> float:
     return number
 
 
-def read_json(path: Path) -> tuple[dict | None, dict | None]:
+class InputTooLargeError(ValueError):
+    """A direct collector input failed the optional per-file byte admission."""
+
+
+def read_input_text(path: Path, max_input_bytes: int | None = None, *, errors: str = "strict") -> str:
+    if max_input_bytes is None:
+        return path.read_text(encoding="utf-8", errors=errors)
+    if isinstance(max_input_bytes, bool) or not isinstance(max_input_bytes, int) or max_input_bytes < 0:
+        raise ValueError("max_input_bytes must be a nonnegative integer or None")
+    data = bytearray()
+    # Unbuffered bounded reads avoid reading an unadmitted suffix into a buffer.
+    # One lookahead byte distinguishes exact EOF from an oversized input.
+    with path.open("rb", buffering=0) as stream:
+        while len(data) <= max_input_bytes:
+            chunk = stream.read(min(65536, max_input_bytes + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+    if len(data) > max_input_bytes:
+        raise InputTooLargeError(f"input exceeds max-input-bytes ({max_input_bytes} bytes)")
+    # Match read_text's UTF-8 and universal-newline policy after admission.
+    return data.decode("utf-8", errors=errors).replace("\r\n", "\n").replace("\r", "\n")
+
+
+def nonnegative_input_bytes(value: str) -> int:
+    try:
+        result = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a nonnegative integer") from None
+    if result < 0:
+        raise argparse.ArgumentTypeError("must be a nonnegative integer")
+    return result
+
+
+def read_json(path: Path, max_input_bytes: int | None = None) -> tuple[dict | None, dict | None]:
     try:
         data = json.loads(
-            path.read_text(encoding="utf-8"),
+            read_input_text(path, max_input_bytes),
             parse_float=finite_json_number,
             parse_constant=finite_json_number,
         )
+    except InputTooLargeError as exc:
+        return None, {"status": "error", "path": str(path), "reason_code": "input_too_large", "reason": str(exc)}
     except UnicodeDecodeError as exc:
         return None, {"status": "error", "path": str(path), "reason": f"invalid UTF-8: {exc}"}
     except OSError as exc:
@@ -92,11 +128,13 @@ def read_json(path: Path) -> tuple[dict | None, dict | None]:
     return data, None
 
 
-def read_toml(path: Path) -> tuple[dict | None, dict | None]:
+def read_toml(path: Path, max_input_bytes: int | None = None) -> tuple[dict | None, dict | None]:
     if not tomllib:
         return None, {"status": "error", "path": str(path), "reason": "tomllib unavailable on Python <3.11"}
     try:
-        return tomllib.loads(path.read_text(encoding="utf-8")), None
+        return tomllib.loads(read_input_text(path, max_input_bytes)), None
+    except InputTooLargeError as exc:
+        return None, {"status": "error", "path": str(path), "reason_code": "input_too_large", "reason": str(exc)}
     except UnicodeDecodeError as exc:
         return None, {"status": "error", "path": str(path), "reason": f"invalid UTF-8: {exc}"}
     except OSError as exc:
@@ -208,13 +246,13 @@ def validate_toml_evidence(manifest: dict, table: str, errors: list[dict]) -> No
             manifest.update({"status": "error", "reason": reason})
 
 
-def collect_manifests(root: Path) -> dict:
+def collect_manifests(root: Path, max_input_bytes: int | None = None) -> dict:
     manifests: dict[str, object] = {"npm": [], "cargo": None, "python": None, "errors": []}
 
     for path in sorted(root.glob("**/package.json")):
         if "node_modules" in path.parts:
             continue
-        data, json_error = read_json(path)
+        data, json_error = read_json(path, max_input_bytes)
         if json_error:
             manifests["errors"].append({**json_error, "path": str(path.relative_to(root))})
             continue
@@ -240,7 +278,7 @@ def collect_manifests(root: Path) -> dict:
     cargo = root / "Cargo.toml"
     cargo_data = None
     if cargo.exists():
-        cargo_data, cargo_error = read_toml(cargo)
+        cargo_data, cargo_error = read_toml(cargo, max_input_bytes)
         if cargo_error:
             manifests["errors"].append({**cargo_error, "path": str(cargo.relative_to(root))})
             manifests["cargo"] = {"path": "Cargo.toml", "status": "error", "reason": cargo_error["reason"]}
@@ -301,7 +339,7 @@ def collect_manifests(root: Path) -> dict:
     pyproject = root / "pyproject.toml"
     pyproject_data = None
     if pyproject.exists():
-        pyproject_data, pyproject_error = read_toml(pyproject)
+        pyproject_data, pyproject_error = read_toml(pyproject, max_input_bytes)
         if pyproject_error:
             manifests["errors"].append({**pyproject_error, "path": str(pyproject.relative_to(root))})
             manifests["python"] = {"path": "pyproject.toml", "status": "error", "reason": pyproject_error["reason"]}
@@ -355,7 +393,7 @@ def first_readme_heading(lines: list[str]) -> str | None:
     return None
 
 
-def collect_readmes(root: Path) -> list[dict]:
+def collect_readmes(root: Path, max_input_bytes: int | None = None) -> list[dict]:
     readmes = []
     for path in sorted(
         path for directory in (root, root / ".github", root / "docs")
@@ -364,7 +402,10 @@ def collect_readmes(root: Path) -> list[dict]:
         if not path.is_file():
             continue
         try:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            lines = read_input_text(path, max_input_bytes, errors="replace").splitlines()
+        except InputTooLargeError as exc:
+            readmes.append({"path": str(path.relative_to(root)), "status": "error", "reason_code": "input_too_large", "reason": str(exc)})
+            continue
         except OSError:
             continue
         non_empty = [line.strip() for line in lines if line.strip()]
@@ -477,9 +518,9 @@ def parse_scalar(value: str) -> object:
     return value
 
 
-def parse_shipwise_discoverability(path: Path) -> dict:
+def parse_shipwise_discoverability(path: Path, max_input_bytes: int | None = None) -> dict:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = read_input_text(path, max_input_bytes).splitlines()
     except OSError as exc:
         raise ValueError(f"cannot read project yaml: {exc}") from exc
 
@@ -527,11 +568,11 @@ def check_item(ok: bool, evidence: object, reason: str = "") -> dict:
     return result
 
 
-def collect_community_files(root: Path) -> dict:
+def collect_community_files(root: Path, max_input_bytes: int | None = None) -> dict:
     directories = (root, root / ".github", root / "docs")
     issue_templates = root / ".github" / "ISSUE_TEMPLATE"
     paths = {
-        "readme": [item["path"] for item in collect_readmes(root)],
+        "readme": [item["path"] for item in collect_readmes(root, max_input_bytes)],
         "license": [name for name in ["LICENSE", "LICENSE.md", "COPYING"] if (root / name).is_file()],
         **{key: sorted(
             str(path.relative_to(root)) for directory in directories for path in directory.glob("*")
@@ -555,8 +596,8 @@ def collect_community_files(root: Path) -> dict:
     }
 
 
-def evaluate_shipwise_project(root: Path, project_yaml: Path) -> dict:
-    discoverability = parse_shipwise_discoverability(project_yaml)
+def evaluate_shipwise_project(root: Path, project_yaml: Path, max_input_bytes: int | None = None) -> dict:
+    discoverability = parse_shipwise_discoverability(project_yaml, max_input_bytes)
     topics = discoverability.get("topics")
     keywords = discoverability.get("keywords")
     text_fields = {
@@ -585,7 +626,7 @@ def evaluate_shipwise_project(root: Path, project_yaml: Path) -> dict:
         homepage_has_credentials = parsed_homepage.username is not None or parsed_homepage.password is not None
         normalized_homepage = public_http.redact_url(normalized_homepage)
         discoverability["homepage_url"] = public_http.redact_url(str(homepage))
-    community_files = collect_community_files(root)
+    community_files = collect_community_files(root, max_input_bytes)
 
     invalid_topics = [
         item for item in topics
@@ -672,6 +713,14 @@ def collect_errors(evidence: dict) -> list[dict]:
     for item in evidence.get("manifests", {}).get("errors", []):
         errors.append({"surface": "manifest", **item})
 
+    for item in evidence.get("readmes", []):
+        if item.get("status") == "error":
+            errors.append({"surface": "readme", **item})
+
+    shipwise = evidence.get("shipwise", {})
+    if shipwise.get("status") == "error":
+        errors.append({"surface": "shipwise", "status": "error", "path": shipwise["project_yaml"], "reason_code": shipwise["reason_code"], "reason": shipwise["reason"]})
+
     for homepage, checks in evidence.get("site", {}).items():
         for resource, resource_check in checks.items():
             if resource_check.get("status") == "error" and resource_check.get("observation") != "not_configured":
@@ -732,13 +781,17 @@ def main() -> int:
     parser.add_argument("--npm", action="append", default=[], help="npm package name to verify. Can be repeated.")
     parser.add_argument("--crate", action="append", default=[], help="crates.io package name to verify. Can be repeated.")
     parser.add_argument("--project-yaml", help="Shipwise project.yaml to validate against discoverability checks.")
+    parser.add_argument(
+        "--max-input-bytes", type=nonnegative_input_bytes,
+        help="Optional per-file byte limit for direct JSON/TOML/README/Shipwise YAML reads; 0 rejects nonempty files. Not a total, subprocess, or network limit.",
+    )
     parser.add_argument("--json", action="store_true", help="Emit JSON Report Envelope.")
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
     if not root.is_dir():
         parser.error(f"--root must be an existing directory: {root}")
-    manifests = collect_manifests(root)
+    manifests = collect_manifests(root, args.max_input_bytes)
     try:
         explicit_homepages = [
             url for url in (normalize_homepage(item, strict=True, label="--homepage") for item in args.homepage) if url
@@ -787,7 +840,9 @@ def main() -> int:
     if args.project_yaml:
         project_yaml = Path(args.project_yaml).resolve()
         try:
-            shipwise = evaluate_shipwise_project(root, project_yaml)
+            shipwise = evaluate_shipwise_project(root, project_yaml, args.max_input_bytes)
+        except InputTooLargeError as exc:
+            shipwise = {"project_yaml": str(project_yaml), "status": "error", "reason_code": "input_too_large", "reason": str(exc)}
         except ValueError as exc:
             parser.error(str(exc))
 
@@ -809,13 +864,13 @@ def main() -> int:
             "repo_view": repo_view,
         },
         "manifests": manifests,
-        "readmes": collect_readmes(root),
+        "readmes": collect_readmes(root, args.max_input_bytes),
         "registry": {
             "npm": {pkg: run_cmd(["npm", "view", "--json", "--registry", "https://registry.npmjs.org", "--", pkg], cwd=root) for pkg in npm_packages},
             "crates": {crate: crate_registry_check(crate, next((item.get("version") for item in cargo_packages if item.get("name") == crate), None)) for crate in crate_names},
         },
         "site": site,
-        "community_files": collect_community_files(root),
+        "community_files": collect_community_files(root, args.max_input_bytes),
         "shipwise": shipwise,
     }
     evidence = redact_evidence(evidence)
