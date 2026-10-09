@@ -110,14 +110,17 @@ def findings_from_site_audit(result: Mapping[str, Any]) -> list[dict[str, Any]]:
     )
     for key, fid, label, severity, surface in check_specs:
         present = bool(checks.get(key))
-        if not present and surface == "meta" and result.get("capture", {}).get("body_truncated"):
+        truncated = result.get("capture", {}).get("body_truncated")
+        if not present and surface == "meta" and (truncated or page.get("http_status") == 206):
             findings.append(make_finding(
                 id=f"{fid}.unknown", title=f"Cannot determine {label} presence",
                 severity="info", confidence="hypothesis", surface=surface,
-                status="unknown", detail="Truncated HTML does not establish absence.",
+                status="unknown", detail=("Truncated HTML does not establish absence." if truncated
+                                          else "HTTP 206 partial HTML does not establish absence."),
                 evidence=[
                     {"kind": "json_pointer", "path": f"/checks/{key}"},
                     {"kind": "json_pointer", "path": "/capture/body_truncated"},
+                    {"kind": "json_pointer", "path": "/page/http_status"},
                     {"kind": "url", "value": url},
                 ],
             ))

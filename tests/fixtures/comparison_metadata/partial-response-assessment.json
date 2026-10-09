@@ -1,0 +1,103 @@
+[
+  {
+    "path": "scripts/site_meta_audit.py",
+    "before_sha256": "838878a8cf4a54406b95a5fae2606742b69fad266712955d029a40c76479fb95",
+    "after_sha256": "f29260bf5f64399dffa6d488898e144530e74c0232fe2793dd40c84a0e332a8d",
+    "hunks": [
+      {
+        "before_start": 486,
+        "after_start": 486,
+        "before": [
+          "            if scope in {\"\", \"googlebot\"} and set(part.strip().split()) & {\"noindex\", \"none\"}:\n",
+          "                noindex = True\n",
+          "        evidence.append({\"source\": \"x_robots_tag\", \"value\": header})\n",
+          "    return {\"crawler\": \"Googlebot\", \"noindex\": True if noindex else None if parser is None or page.get(\"body_truncated\") else False,\n",
+          "            \"evidence\": evidence, \"scope\": \"observed_raw_response\", \"indexed\": \"unknown\"}\n",
+          "\n",
+          "\n"
+        ],
+        "after": [
+          "            if scope in {\"\", \"googlebot\"} and set(part.strip().split()) & {\"noindex\", \"none\"}:\n",
+          "                noindex = True\n",
+          "        evidence.append({\"source\": \"x_robots_tag\", \"value\": header})\n",
+          "    return {\"crawler\": \"Googlebot\", \"noindex\": True if noindex else None if parser is None or page.get(\"body_truncated\") or page.get(\"http_status\") == 206 else False,\n",
+          "            \"evidence\": evidence, \"scope\": \"observed_raw_response\", \"indexed\": \"unknown\"}\n",
+          "\n",
+          "\n"
+        ]
+      },
+      {
+        "before_start": 514,
+        "after_start": 514,
+        "before": [
+          "        if valid:\n",
+          "            targets.append(urllib.parse.urldefrag(target)[0])\n",
+          "    targets = list({canonical_key(target): target for target in targets}.values())\n",
+          "    complete = not result[\"capture\"][\"body_truncated\"]\n",
+          "    # HTTP Link declarations are retained, but aren't parsed by this HTML check.\n",
+          "    headers_need_review = any(re.search(r'\\brel\\s*=\\s*(?:\"[^\"\\n]*\\bcanonical\\b|canonical(?:\\s|;|,|$))', header, re.I)\n",
+          "                              for header in result[\"page\"].get(\"link_headers\", []))\n"
+        ],
+        "after": [
+          "        if valid:\n",
+          "            targets.append(urllib.parse.urldefrag(target)[0])\n",
+          "    targets = list({canonical_key(target): target for target in targets}.values())\n",
+          "    complete = not result[\"capture\"][\"body_truncated\"] and result[\"page\"].get(\"http_status\") != 206\n",
+          "    # HTTP Link declarations are retained, but aren't parsed by this HTML check.\n",
+          "    headers_need_review = any(re.search(r'\\brel\\s*=\\s*(?:\"[^\"\\n]*\\bcanonical\\b|canonical(?:\\s|;|,|$))', header, re.I)\n",
+          "                              for header in result[\"page\"].get(\"link_headers\", []))\n"
+        ]
+      },
+      {
+        "before_start": 545,
+        "after_start": 545,
+        "before": [
+          "    canonical = canonical_assessment(result)\n",
+          "    json_ld = result[\"json_ld\"]\n",
+          "    parse_valid = all(item[\"status\"] == \"parsed\" for item in json_ld) if json_ld else None\n",
+          "    if result[\"capture\"][\"body_truncated\"]:\n",
+          "        parse_valid = None\n",
+          "        add(\"capture_incomplete\", \"warning\", \"HTML is truncated; absence and complete validation are unknown.\", \"capture\")\n",
+          "    result[\"assessment\"].update({\n",
+          "        \"crawl_access\": resources[\"robots_access\"], \"indexing\": indexing, \"canonical\": canonical,\n",
+          "        \"json_ld_parse_valid\": parse_valid,\n"
+        ],
+        "after": [
+          "    canonical = canonical_assessment(result)\n",
+          "    json_ld = result[\"json_ld\"]\n",
+          "    parse_valid = all(item[\"status\"] == \"parsed\" for item in json_ld) if json_ld else None\n",
+          "    incomplete = result[\"capture\"][\"body_truncated\"] or result[\"page\"].get(\"http_status\") == 206\n",
+          "    if incomplete:\n",
+          "        parse_valid = None\n",
+          "        reason = \"HTML is truncated\" if result[\"capture\"][\"body_truncated\"] else \"HTTP 206 contains only a partial representation\"\n",
+          "        add(\"capture_incomplete\", \"warning\", reason + \"; absence and complete validation are unknown.\", \"capture\")\n",
+          "    result[\"assessment\"].update({\n",
+          "        \"crawl_access\": resources[\"robots_access\"], \"indexing\": indexing, \"canonical\": canonical,\n",
+          "        \"json_ld_parse_valid\": parse_valid,\n"
+        ]
+      },
+      {
+        "before_start": 574,
+        "after_start": 576,
+        "before": [
+          "        add(\"json_ld_incomplete\", \"warning\", \"An unfinished JSON-LD script cannot be validated.\", \"json_ld\")\n",
+          "    for key in (\"title\", \"meta_description\"):\n",
+          "        present = bool((result[key] or \"\").strip()) if key == \"meta_description\" else bool(result[key])\n",
+          "        if not present and not result[\"capture\"][\"body_truncated\"]:\n",
+          "            add(key + \"_missing\", \"warning\", f\"No nonempty {key} was observed.\", key)\n",
+          "    if len(result[\"h1\"]) != 1:\n",
+          "        add(\"h1_review\", \"info\", \"Review the observed heading hierarchy in context; H1 count alone is not an indexing failure.\", \"h1\", \"Likely\")\n"
+        ],
+        "after": [
+          "        add(\"json_ld_incomplete\", \"warning\", \"An unfinished JSON-LD script cannot be validated.\", \"json_ld\")\n",
+          "    for key in (\"title\", \"meta_description\"):\n",
+          "        present = bool((result[key] or \"\").strip()) if key == \"meta_description\" else bool(result[key])\n",
+          "        if not present and not incomplete:\n",
+          "            add(key + \"_missing\", \"warning\", f\"No nonempty {key} was observed.\", key)\n",
+          "    if len(result[\"h1\"]) != 1:\n",
+          "        add(\"h1_review\", \"info\", \"Review the observed heading hierarchy in context; H1 count alone is not an indexing failure.\", \"h1\", \"Likely\")\n"
+        ]
+      }
+    ]
+  }
+]
