@@ -620,6 +620,9 @@ def evaluate_shipwise_project(root: Path, project_yaml: Path, max_input_bytes: i
     primary_keyword = text_fields["primary_keyword"].strip()
     description = text_fields["description"].strip()
 
+    for field, value in (("topics", topics), ("keywords", keywords)):
+        if field in discoverability and not isinstance(value, list):
+            type_errors[field] = check_item(False, None, f"discoverability.{field} must be a list")
     if not isinstance(topics, list):
         topics = []
     if not isinstance(keywords, list):
