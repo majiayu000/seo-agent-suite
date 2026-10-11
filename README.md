@@ -124,6 +124,10 @@ description, canonical link, `og:title`, and a JSON-LD script start. Their
 stable rule IDs and `page` subject do not depend on outcome-dependent legacy
 finding IDs. A collection can be complete while SEO status is partial. A
 truncated page can contain positive observations without becoming complete.
+HTTP 206 partial responses likewise cannot establish missing metadata, even
+when the entire fragment fits the sample cap. Primary findings retain observed
+lexical presence but report unobserved tags as unknown without add-tag actions;
+the truncation flags continue to describe actual sampling only.
 
 The requested and successful effective URLs are exact strings: spelling,
 query order, fragment, casing and slashes are preserved. Scope includes actual
@@ -288,7 +292,8 @@ The page report adds `assessment` and `findings` alongside the presence checks:
 - `assessment.indexing` evaluates head-level robots/Googlebot meta declarations
   and applicable `X-Robots-Tag` headers, including `none` and conflicting
   declarations. `noindex: false` means no such directive was observed in the
-  complete response; truncated HTML without an observed noindex reports `null`.
+  complete response; truncated HTML or HTTP 206 without an observed noindex
+  reports `null`.
   `indexed` remains `unknown`. A robots block can prevent crawlers seeing noindex;
   neither crawl permission nor a successful fetch proves indexing.
 - `assessment.canonical` distinguishes missing, invalid, conflicting, self,

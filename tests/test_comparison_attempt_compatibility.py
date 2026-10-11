@@ -19,9 +19,9 @@ TARGETS = {
 }
 
 
-def apply_body_fixture(root, *, reverse=False):
+def apply_body_fixture(root, *, reverse=False, filename="q5-no-option.json"):
     """Materialize one exact frozen Q5/P07 source pair, only in test scratch."""
-    fixture = json.loads((ROOT / "tests/fixtures/comparison_metadata/q5-no-option.json").read_text())
+    fixture = json.loads((ROOT / "tests/fixtures/comparison_metadata" / filename).read_text())
     source, target = ("after", "before") if reverse else ("before", "after")
     for entry in fixture:
         assert entry["path"] in TARGETS
@@ -56,6 +56,14 @@ def composed_checkout():
         root = (Path(directory) / "suite").resolve()
         shutil.copytree(ROOT, root, ignore=shutil.ignore_patterns(
             ".git", "__pycache__", "*.pyc", "build", "dist", "*.egg-info"))
+        # Primary HTTP 206 assessment changes no comparison extraction or
+        # transport callable. Restore only its exact reviewed pre-patch bytes
+        # before materializing historical whole-file fixtures; unknown variants
+        # still fail the existing hash/context assertions below.
+        partial_fixture = json.loads((ROOT / "tests/fixtures/comparison_metadata/partial-response-assessment.json").read_text())
+        if all(hashlib.sha256((root / entry["path"]).read_bytes()).hexdigest()
+               == entry["after_sha256"] for entry in partial_fixture):
+            apply_body_fixture(root, reverse=True, filename="partial-response-assessment.json")
         # Retain the historical P07 fixture even when the outer checkout has
         # the exact reviewed Q5 source. This is test materialization, not runtime
         # recognition: no unsupported or merely similar source is accepted.

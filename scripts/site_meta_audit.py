@@ -487,7 +487,7 @@ def indexing_evidence(parser: MetaParser | None, page: dict) -> dict:
             if scope in {"", "googlebot"} and set(part.strip().split()) & {"noindex", "none"}:
                 noindex = True
         evidence.append({"source": "x_robots_tag", "value": header})
-    return {"crawler": "Googlebot", "noindex": True if noindex else None if parser is None or page.get("body_truncated") else False,
+    return {"crawler": "Googlebot", "noindex": True if noindex else None if parser is None or page.get("body_truncated") or page.get("http_status") == 206 else False,
             "evidence": evidence, "scope": "observed_raw_response", "indexed": "unknown"}
 
 
@@ -515,7 +515,7 @@ def canonical_assessment(result: dict) -> dict:
         if valid:
             targets.append(urllib.parse.urldefrag(target)[0])
     targets = list({canonical_key(target): target for target in targets}.values())
-    complete = not result["capture"]["body_truncated"]
+    complete = not result["capture"]["body_truncated"] and result["page"].get("http_status") != 206
     # HTTP Link declarations are retained, but aren't parsed by this HTML check.
     headers_need_review = any(re.search(r'\brel\s*=\s*(?:"[^"\n]*\bcanonical\b|canonical(?:\s|;|,|$))', header, re.I)
                               for header in result["page"].get("link_headers", []))
@@ -546,9 +546,11 @@ def assess(result: dict, parser: MetaParser | None, resources: dict | None) -> N
     canonical = canonical_assessment(result)
     json_ld = result["json_ld"]
     parse_valid = all(item["status"] == "parsed" for item in json_ld) if json_ld else None
-    if result["capture"]["body_truncated"]:
+    incomplete = result["capture"]["body_truncated"] or result["page"].get("http_status") == 206
+    if incomplete:
         parse_valid = None
-        add("capture_incomplete", "warning", "HTML is truncated; absence and complete validation are unknown.", "capture")
+        reason = "HTML is truncated" if result["capture"]["body_truncated"] else "HTTP 206 contains only a partial representation"
+        add("capture_incomplete", "warning", reason + "; absence and complete validation are unknown.", "capture")
     result["assessment"].update({
         "crawl_access": resources["robots_access"], "indexing": indexing, "canonical": canonical,
         "json_ld_parse_valid": parse_valid,
@@ -575,7 +577,7 @@ def assess(result: dict, parser: MetaParser | None, resources: dict | None) -> N
         add("json_ld_incomplete", "warning", "An unfinished JSON-LD script cannot be validated.", "json_ld")
     for key in ("title", "meta_description"):
         present = bool((result[key] or "").strip()) if key == "meta_description" else bool(result[key])
-        if not present and not result["capture"]["body_truncated"]:
+        if not present and not incomplete:
             add(key + "_missing", "warning", f"No nonempty {key} was observed.", key)
     if len(result["h1"]) != 1:
         add("h1_review", "info", "Review the observed heading hierarchy in context; H1 count alone is not an indexing failure.", "h1", "Likely")
