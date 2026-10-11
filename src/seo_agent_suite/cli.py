@@ -21,6 +21,16 @@ from seo_agent_suite.report import (
 )
 
 
+def _nonnegative_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a nonnegative integer") from exc
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be a nonnegative integer")
+    return number
+
+
 def _print_json(payload: dict) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
@@ -86,6 +96,9 @@ def cmd_repo_baseline(args: argparse.Namespace) -> int:
     if args.project_yaml:
         argv.extend(["--project-yaml", args.project_yaml])
 
+    if getattr(args, "max_input_bytes", None) is not None:
+        argv.extend(["--max-input-bytes", str(args.max_input_bytes)])
+
     buf = io.StringIO()
     old_argv = sys.argv
     try:
@@ -132,7 +145,10 @@ def cmd_repo_baseline(args: argparse.Namespace) -> int:
 
 def cmd_site_meta(args: argparse.Namespace) -> int:
     module = load_script("site_meta_audit.py")
-    audit_options: dict = {}
+    audit_options = {
+        name: value for name in ("max_http_attempts", "max_http_body_bytes")
+        if (value := getattr(args, name, None)) is not None
+    }
     result = module.audit(args.url, **audit_options)
     if "findings" not in result or "schema_version" not in result:
         result = enrich_site_result(result)
@@ -249,6 +265,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--project-yaml",
         help="Optional Shipwise project.yaml (adapter; suite works without Shipwise).",
     )
+    p_repo.add_argument(
+        "--max-input-bytes", type=_nonnegative_int,
+        help="Optional per-file byte limit for direct JSON/TOML/README/Shipwise YAML reads; 0 rejects nonempty files. Not a total, subprocess, or network limit.",
+    )
     p_repo.add_argument("--json", action="store_true", help="Emit JSON Report Envelope.")
     p_repo.set_defaults(func=cmd_repo_baseline)
 
@@ -258,6 +278,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Audit crawlable metadata for one public URL.",
     )
     p_site.add_argument("url", help="Public http(s) URL to inspect.")
+    p_site.add_argument(
+        "--max-http-attempts", type=_nonnegative_int,
+        help="Optional logical target-attempt allowance shared across this audit; 0 starts no HTTP attempts.",
+    )
+    p_site.add_argument(
+        "--max-http-body-bytes", type=_nonnegative_int,
+        help="Optional cumulative encoded payload bytes exposed by HTTP reads, including lookahead/partial reads; not network traffic or bytes hidden by failed reads. 0 starts no fetches.",
+    )
     p_site.add_argument("--json", action="store_true", help="Emit JSON Report Envelope.")
     p_site.set_defaults(func=cmd_site_meta)
 

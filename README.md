@@ -44,8 +44,8 @@ python3 scripts/repo_seo_baseline.py --root /path/to/target-repo --json
 python3 scripts/site_meta_audit.py https://example.com/ --json
 ```
 
-For an optional per-file admission limit, add `--max-input-bytes N` to the direct
-script command. `N` is a nonnegative byte count; `0` rejects every nonempty input,
+For an optional per-file admission limit, add `--max-input-bytes N` to
+`seo-agent repo-baseline` (alias `repo`) or the direct script command. `N` is a nonnegative byte count; `0` rejects every nonempty input,
 and omitting it preserves the existing unlimited read policy. It covers only
 files directly read by the collector: JSON manifests, root Cargo/Python TOML,
 README candidates, and the selected Shipwise YAML. Oversized inputs are rejected
@@ -54,12 +54,13 @@ reported as collection errors, and make `--json` exit 1 while preserving valid
 sibling evidence. No truncated prefix is treated as a complete document.
 
 This is not a total-memory, parser-depth, elapsed-time, subprocess-output, or
-network limit. Discovery and path/symlink behavior are unchanged. The packaged
-`seo-agent`/MCP interface does not forward this direct-script option yet.
+network limit. Discovery and path/symlink behavior are unchanged. The MCP
+interface does not forward this option.
 
-### Optional direct-site payload allowance
+### Optional site collection allowances
 
-`python3 scripts/site_meta_audit.py URL --max-http-body-bytes N --json`
+`seo-agent site-meta URL --max-http-body-bytes N --json`
+(or `python3 scripts/site_meta_audit.py URL --max-http-body-bytes N --json`)
 sets one nonnegative allowance across the page, robots, sitemap candidates and
 endpoint fallbacks. It counts **encoded response-body payload bytes exposed by
 HTTP reads**, before text decoding, including discarded sample lookahead and
@@ -80,12 +81,19 @@ completion describes only collection omitted by selected allowances. Observed
 positive page/resource evidence is retained, while incomplete or unchecked
 resources cannot prove absence. Default exits remain page-fetch-based: page
 success with limited body/auxiliary evidence returns 0; a refused page fetch
-returns 1. The existing `--fail-on` can gate limit warnings. Invalid limits return
-2. This option can be combined with direct-script `--max-http-attempts`.
+returns 1. The direct-script `--fail-on` can gate limit warnings. Invalid limits return
+2. This option can be combined with `--max-http-attempts N`, which limits logical
+target attempts shared across the audit; `0` starts no HTTP attempts. Both flags
+are also available through the `site` command alias.
+
+Packaged CLI invocations with either explicit site limit retain `unknown`
+comparison configuration/completion and are incomparable, even when an allowance
+is generous enough to finish collection. Omitting both flags preserves the
+existing verified default comparison policy; active limits are not assigned a
+new comparable policy.
 
 No elapsed-time, decompression, parser-depth or total-memory bound is promised.
-The repository collector and packaged `seo-agent`/MCP interfaces do not forward
-this option. It is a bounded single-page collection feature, not a crawler.
+The repository collector and MCP interface do not forward these site options. It is a bounded single-page collection feature, not a crawler.
 
 ### Report Envelope
 
