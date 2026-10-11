@@ -429,6 +429,27 @@ class RepoRegressions(unittest.TestCase):
                 self.assertEqual(code, 1 if count > 20 else 0)
                 self.assertEqual(bool(payload['errors']), count > 20)
 
+    def test_declared_topics_must_be_a_list(self):
+        self.assert_declared_array_type_error('topics')
+
+    def test_declared_keywords_must_be_a_list(self):
+        self.assert_declared_array_type_error('keywords')
+
+    def assert_declared_array_type_error(self, field):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'README.md').write_text('# Fixture')
+            (root / 'LICENSE').write_text('MIT')
+            project = root / 'project.yaml'
+            for value in ('not-a-list', 'null', 'true', '123', '{bad: value}'):
+                with self.subTest(field=field, value=value):
+                    project.write_text(f'discoverability:\n  {field}: {value}\n')
+                    code, payload, _, _ = self.run_main(root, '--project-yaml', str(project))
+                    self.assertEqual(code, 1)
+                    self.assertEqual(payload['status'], 'error')
+                    self.assertIn({'surface': 'shipwise', 'check': field,
+                                   'reason': f'discoverability.{field} must be a list'}, payload['errors'])
+
     @unittest.skipUnless(shutil.which('cargo'), 'Cargo is needed for real workspace collection')
     def test_real_virtual_workspace_inheritance_without_lockfile_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
