@@ -563,8 +563,10 @@ def parse_shipwise_discoverability(path: Path, max_input_bytes: int | None = Non
     return data
 
 
-def check_item(ok: bool, evidence: object, reason: str = "") -> dict:
+def check_item(ok: bool, evidence: object, reason: str = "", *, severity: str = "error") -> dict:
     result = {"status": "ok" if ok else "error", "evidence": evidence}
+    if severity == "warning":
+        result["severity"] = severity
     if reason and not ok:
         result["reason"] = reason
     return result
@@ -583,6 +585,7 @@ def collect_community_files(root: Path, max_input_bytes: int | None = None) -> d
             "contributing": ["CONTRIBUTING.md", "CONTRIBUTING"],
             "code_of_conduct": ["CODE_OF_CONDUCT.md", "CODE_OF_CONDUCT"],
             "security": ["SECURITY.md", "SECURITY"],
+            "support": ["SUPPORT.md", "SUPPORT"],
         }.items()},
     }
     template_candidates = sorted(
@@ -650,48 +653,53 @@ def evaluate_shipwise_project(root: Path, project_yaml: Path, max_input_bytes: i
     )
 
     checks = {
-        "description": check_item(bool(description), description, "missing discoverability.description"),
-        "primary_keyword": check_item(bool(primary_keyword), primary_keyword, "missing discoverability.primary_keyword"),
+        "description": check_item(bool(description), description, "missing discoverability.description", severity="warning"),
+        "primary_keyword": check_item(bool(primary_keyword), primary_keyword, "missing discoverability.primary_keyword", severity="warning"),
         "primary_keyword_in_description": check_item(
             primary_in_description,
             {"primary_keyword": primary_keyword, "description": description},
-            "primary keyword must appear in discoverability.description",
+            "review description relevance; exact primary-keyword wording is optional",
+            severity="warning",
         ),
         "keywords": check_item(
             bool(keywords) and not invalid_keyword_indexes,
             keywords,
             f"discoverability.keywords has invalid nonblank-string entries at indexes {invalid_keyword_indexes}"
             if invalid_keyword_indexes else "missing discoverability.keywords",
+            severity="error" if invalid_keyword_indexes else "warning",
         ),
-        "topics_count": check_item(5 <= len(topics) <= 20, len(topics), "topics must contain 5 to 20 entries"),
+        "topics_count": check_item(len(topics) <= 20, len(topics), "GitHub allows at most 20 topics; no minimum is required"),
         "topics_format": check_item(not invalid_topics, invalid_topics, "topics must be lowercase hyphenated GitHub topic slugs"),
         "topics_unique": check_item(not duplicate_topics, duplicate_topics, "topics must not contain duplicates"),
         "homepage_url": check_item(
             bool(normalized_homepage) and not homepage_has_credentials,
             normalized_homepage,
             "URL credentials are not allowed" if homepage_has_credentials else "missing discoverability.homepage_url",
+            severity="error" if homepage_has_credentials else "warning",
         ),
         "social_image_set": check_item(
             discoverability.get("social_image_set") is True,
             discoverability.get("social_image_set"),
             "social preview image is not marked as set",
+            severity="warning",
         ),
         "readme": check_item(community_files["readme"], community_files["readme"], "README missing"),
         "license": check_item(community_files["license"], community_files["license"], "LICENSE missing"),
         "contributing": check_item(
-            community_files["contributing"], community_files["contributing"], "CONTRIBUTING missing"
+            community_files["contributing"], community_files["contributing"], "CONTRIBUTING missing", severity="warning"
         ),
         "code_of_conduct": check_item(
-            community_files["code_of_conduct"], community_files["code_of_conduct"], "CODE_OF_CONDUCT missing"
+            community_files["code_of_conduct"], community_files["code_of_conduct"], "CODE_OF_CONDUCT missing", severity="warning"
         ),
-        "security": check_item(community_files["security"], community_files["security"], "SECURITY missing"),
+        "security": check_item(community_files["security"], community_files["security"], "SECURITY missing", severity="warning"),
         "issue_templates": check_item(
-            community_files["issue_templates"], community_files["issue_templates"], "issue templates missing"
+            community_files["issue_templates"], community_files["issue_templates"], "issue templates missing", severity="warning"
         ),
         "support_path": check_item(
-            community_files["issue_templates"] and community_files["contributing"],
+            community_files["issue_templates"] or community_files["contributing"] or community_files["support"],
             {**community_files, "validation_scope": "candidate file presence; GitHub support path not validated"},
-            "support path candidates require both issue templates and CONTRIBUTING",
+            "verify a reachable support route; it may be linked in the README or hosted elsewhere",
+            severity="warning",
         ),
     }
 
@@ -734,17 +742,75 @@ def collect_errors(evidence: dict) -> list[dict]:
                 })
 
     for name, item in evidence.get("shipwise", {}).get("checks", {}).items():
-        if item.get("status") == "error":
+        if item.get("status") == "error" and item.get("severity") != "warning":
             errors.append({"surface": "shipwise", "check": name, "reason": item.get("reason", "check failed")})
 
     return errors
 
 
-def crate_registry_check(name: str, local_version: object = None) -> dict:
+def repository_identity(value: object) -> str | None:
+    """Compare declared source URLs, without treating a homepage or name as ownership."""
+    if isinstance(value, dict):
+        value = value.get("url")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    value = value.strip().removeprefix("git+")
+    if value.startswith("github:"):
+        value = "https://github.com/" + value.removeprefix("github:")
+    elif re.fullmatch(r"[\w.-]+/[\w.-]+", value):
+        value = "https://github.com/" + value
+    elif re.fullmatch(r"[^/@\s]+@[^/:\s]+:.+", value):
+        value = "ssh://" + value.replace(":", "/", 1)
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        if parsed.scheme not in {"http", "https", "git", "ssh"} or not parsed.hostname or parsed.query or parsed.fragment:
+            return None
+        port = parsed.port
+        if port is not None and (parsed.scheme, port) not in {("http", 80), ("https", 443), ("ssh", 22), ("git", 9418)}:
+            return None
+        host = parsed.hostname.lower()
+        path = parsed.path.rstrip("/").removesuffix(".git")
+        if not path or path == "/":
+            return None
+        if host == "github.com":
+            if re.fullmatch(r"/[\w.-]+/[\w.-]+", path) is None:
+                return None
+            path = path.lower()
+        return host + path
+    except ValueError:
+        return None
+
+
+def npm_registry_check(name: str, local_version: object = None, expected_repository: object = None, *, cwd: Path | None = None) -> dict:
+    result = run_cmd(["npm", "view", "--json", "--registry", "https://registry.npmjs.org", "--", name], cwd=cwd)
+    result.update({"registry": "npmjs.org", "local_version": local_version,
+                   "expected_repository": expected_repository, "repository_matches": None})
+    if result.get("status") != "ok":
+        return result
+    raw_metadata = result.pop("stdout", "")
+    try:
+        data = json.loads(raw_metadata, parse_float=finite_json_number, parse_constant=finite_json_number)
+        if not isinstance(data, dict) or data.get("name") != name or not isinstance(data.get("version"), str):
+            raise ValueError("npm response lacks exact package identity/version")
+        repository = data.get("repository")
+        result.update({"name": data["name"], "published_version": data["version"], "repository": repository,
+                       "package_url": "https://www.npmjs.com/package/" + name, "metadata": data})
+        # Keep parsed metadata so recursive URL redaction also covers escaped JSON URLs.
+        actual, expected = repository_identity(repository), repository_identity(expected_repository)
+        result["repository_matches"] = actual == expected if actual and expected else None
+        if isinstance(local_version, str):
+            result["version_matches"] = local_version == data["version"]
+    except (ValueError, RecursionError):
+        result.update({"status": "error", "reason": "cannot verify exact package identity/version from npm response"})
+    return result
+
+
+def crate_registry_check(name: str, local_version: object = None, expected_repository: object = None) -> dict:
     url = "https://crates.io/api/v1/crates/" + urllib.parse.quote(name, safe="")
     response = public_http.fetch_public_url(url)
     result = {key: value for key, value in response.items() if key != "body"}
-    result.update({"registry": "crates.io", "local_version": local_version})
+    result.update({"registry": "crates.io", "local_version": local_version,
+                   "expected_repository": expected_repository, "repository_matches": None})
     if response.get("http_status") == 404:
         result["observation"] = "missing"
     if response.get("status") != "ok":
@@ -752,14 +818,18 @@ def crate_registry_check(name: str, local_version: object = None) -> dict:
     try:
         if response.get("body_truncated"):
             raise ValueError("truncated crates.io response")
-        data = json.loads(response.get("body", ""))
+        data = json.loads(response.get("body", ""), parse_float=finite_json_number, parse_constant=finite_json_number)
         crate = data.get("crate") if isinstance(data, dict) else None
         if not isinstance(crate, dict) or crate.get("id") != name or not isinstance(crate.get("max_version"), str):
             raise ValueError("crates.io response lacks exact crate identity/version")
-        result.update({"name": crate["id"], "published_version": crate["max_version"], "package_url": "https://crates.io/crates/" + name})
+        repository = crate.get("repository")
+        result.update({"name": crate["id"], "published_version": crate["max_version"],
+                       "package_url": "https://crates.io/crates/" + name, "repository": repository})
+        actual, expected = repository_identity(repository), repository_identity(expected_repository)
+        result["repository_matches"] = actual == expected if actual and expected else None
         if isinstance(local_version, str):
             result["version_matches"] = local_version == crate["max_version"]
-    except ValueError:
+    except (ValueError, RecursionError):
         result.update({"status": "error", "reason": "cannot verify exact crate identity/version from crates.io response"})
     return result
 
@@ -801,10 +871,14 @@ def main() -> int:
     except ValueError as exc:
         parser.error(str(exc))
     repo_view = run_cmd(["gh", "repo", "view", "--json", "nameWithOwner,description,homepageUrl,repositoryTopics,visibility,defaultBranchRef"], cwd=root)
+    remote = run_cmd(["git", "remote", "get-url", "origin"], cwd=root)
+    expected_repository = (remote.get("stdout") or None) if remote.get("status") == "ok" else None
     github_homepages = []
     if repo_view.get("status") == "ok":
         try:
             github = json.loads(repo_view.get("stdout", ""))
+            if isinstance(github, dict) and isinstance(github.get("nameWithOwner"), str):
+                expected_repository = "https://github.com/" + github["nameWithOwner"]
             homepage = normalize_homepage(github.get("homepageUrl"), strict=True, label="GitHub homepage") if isinstance(github, dict) else None
             if homepage:
                 github_homepages.append(homepage)
@@ -826,8 +900,11 @@ def main() -> int:
                 names.append(name)
 
     for item in manifests.get("npm", []):
+        publish_config = item.get("publishConfig") if isinstance(item, dict) else None
+        registry = publish_config.get("registry") if isinstance(publish_config, dict) else None
         if (
             isinstance(item, dict) and item.get("status") != "error"
+            and (registry is None or normalize_homepage(registry) == "https://registry.npmjs.org")
             and not item.get("private") and item.get("name") and item["name"] not in npm_packages
         ):
             npm_packages.append(item["name"])
@@ -861,15 +938,15 @@ def main() -> int:
         "collected_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "git": {
             "status": run_cmd(["git", "status", "--short", "--branch"], cwd=root),
-            "remote": run_cmd(["git", "remote", "get-url", "origin"], cwd=root),
+            "remote": remote,
             "head": run_cmd(["git", "rev-parse", "HEAD"], cwd=root),
             "repo_view": repo_view,
         },
         "manifests": manifests,
         "readmes": collect_readmes(root, args.max_input_bytes),
         "registry": {
-            "npm": {pkg: run_cmd(["npm", "view", "--json", "--registry", "https://registry.npmjs.org", "--", pkg], cwd=root) for pkg in npm_packages},
-            "crates": {crate: crate_registry_check(crate, next((item.get("version") for item in cargo_packages if item.get("name") == crate), None)) for crate in crate_names},
+            "npm": {pkg: npm_registry_check(pkg, next((item.get("version") for item in manifests["npm"] if item.get("name") == pkg), None), expected_repository, cwd=root) for pkg in npm_packages},
+            "crates": {crate: crate_registry_check(crate, next((item.get("version") for item in cargo_packages if item.get("name") == crate), None), expected_repository) for crate in crate_names},
         },
         "site": site,
         "community_files": collect_community_files(root, args.max_input_bytes),

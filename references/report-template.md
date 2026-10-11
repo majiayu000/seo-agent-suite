@@ -67,6 +67,13 @@ keyword volume, backlinks, and AI visibility. List manual/auth/data blockers
 only for the conclusions they prevent. Crawl or content readiness alone does
 not establish any of those outcomes.
 
+For repository work, record each applicable state independently with source,
+retrieval time and inspected revision/version: source merged; exact registry
+package/version linked to this repository; artifact/install check; GitHub
+Release; site deployment; engine index observation. Use unknown when unmeasured
+and not applicable for private/source-only channels. A merge, a same-name
+registry result, a Release or a live page cannot establish another state.
+
 ## Next Actions
 
 List concrete actions with target URL/file, owner when relevant, retest command
