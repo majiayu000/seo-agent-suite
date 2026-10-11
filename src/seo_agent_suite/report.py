@@ -217,11 +217,39 @@ def findings_from_repo_baseline(evidence: Mapping[str, Any]) -> list[dict[str, A
                         severity="low",
                         confidence="confirmed",
                         surface="repo",
-                        status="fail",
-                        detail=f"community_files.{name}=false",
+                        status="fail" if name in {"readme", "license"} else "unknown",
+                        detail=(f"community_files.{name}=false; review whether this file is relevant. "
+                                "File presence alone does not verify quickstart, legal terms, proof or reachable support."),
                         evidence=[{"kind": "json_pointer", "path": f"/community_files/{name}"}],
                     )
                 )
+
+    for name, check in evidence.get("shipwise", {}).get("checks", {}).items():
+        if check.get("severity") != "warning" or (check.get("status") == "ok" and name != "support_path"):
+            continue
+        findings.append(make_finding(
+            id=f"repo.shipwise.{name}", title=f"Review optional discoverability evidence: {name}",
+            severity="medium" if name == "support_path" else "low", confidence="confirmed",
+            surface="shipwise", status="unknown",
+            detail=("Support candidates require a current reachability/usability check; README links or external support may suffice."
+                    if name == "support_path" else str(check.get("reason") or "Optional improvement, not a launch blocker.")),
+            evidence=[{"kind": "json_pointer", "path": f"/shipwise/checks/{name}"}],
+        ))
+
+    for registry, packages in (evidence.get("registry") or {}).items():
+        for name, package in packages.items():
+            matches = package.get("repository_matches")
+            verified = package.get("status") == "ok" and matches is True
+            findings.append(make_finding(
+                id=f"repo.registry.{registry}.{name}",
+                title="Registry source metadata matches" if verified else "Registry relationship remains unverified",
+                severity="info" if verified else "medium", confidence="confirmed",
+                surface="registry", status="pass" if verified else "unknown",
+                detail=("Exact package name and declared source repository match; this does not verify artifact contents or installation."
+                        if verified else "Do not treat a same-name package, missing response or different/unavailable repository link as this project's publication. "
+                        "Source-only/private distribution may be not applicable; no publication is required by this audit."),
+                evidence=[{"kind": "json_pointer", "path": "/registry/" + registry + "/" + name.replace("~", "~0").replace("/", "~1")}],
+            ))
 
     if not findings and evidence.get("status") == "ok":
         findings.append(

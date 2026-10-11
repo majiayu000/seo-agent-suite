@@ -3,6 +3,7 @@
 import importlib.util
 import io
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -279,7 +280,7 @@ class RepoRegressions(unittest.TestCase):
                     self.assertEqual(bool(payload['registry']['crates']), expected)
                 with mock.patch.object(repo, 'crate_registry_check', return_value={'status': 'ok'}) as check:
                     self.run_main(root, '--crate', 'demo')
-                    check.assert_called_once_with('demo', '1.0.0')
+                    check.assert_called_once_with('demo', '1.0.0', None)
 
     def test_community_path_evidence_reports_candidates(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -307,6 +308,151 @@ class RepoRegressions(unittest.TestCase):
         with mock.patch.object(repo, 'http_check', return_value={'status': 'ok'}), mock.patch.object(repo, 'crawl_resource_checks', return_value=candidates):
             checks = repo.site_resource_checks('https://site.example')
             self.assertNotIn('sitemap_discovery', checks['sitemap'])
+
+    def test_same_name_registry_packages_require_repository_relationship(self):
+        expected = 'https://github.com/fixture/current'
+        for repository, matches in [('https://github.com/fixture/other', False),
+                                    ('git+https://github.com/fixture/current.git', True),
+                                    (None, None)]:
+            with self.subTest(repository=repository):
+                crate = {'id': 'demo', 'max_version': '1.0.0', 'repository': repository}
+                npm = {'name': 'demo', 'version': '1.0.0', 'repository': {'url': repository}}
+                with mock.patch.object(repo.public_http, 'fetch_public_url', return_value={
+                        'status': 'ok', 'body': json.dumps({'crate': crate})}):
+                    result = repo.crate_registry_check('demo', '1.0.0', expected)
+                self.assertIs(result['repository_matches'], matches)
+                with mock.patch.object(repo, 'run_cmd', return_value={
+                        'status': 'ok', 'stdout': json.dumps(npm)}):
+                    result = repo.npm_registry_check('demo', '1.0.0', expected)
+                self.assertIs(result['repository_matches'], matches)
+
+    def test_npm_wrong_name_and_invalid_response_stay_unverified(self):
+        for body in ('{}', '[]', 'not json', '{"name":"other","version":"1.0.0"}'):
+            with self.subTest(body=body), mock.patch.object(repo, 'run_cmd', return_value={
+                    'status': 'ok', 'stdout': body}):
+                result = repo.npm_registry_check('demo')
+            self.assertEqual(result['status'], 'error')
+            self.assertNotIn('published_version', result)
+
+    def test_npm_metadata_redaction_handles_json_escaped_url_credentials(self):
+        for name in ('demo', 'other'):
+            body = json.dumps({'name': name, 'version': '1.0.0',
+                               'repository': 'https://user:fake-secret@github.com/fixture/current'}).replace('/', r'\u002f')
+            with self.subTest(name=name), mock.patch.object(repo, 'run_cmd', return_value={
+                    'status': 'ok', 'stdout': body}):
+                result = repo.redact_evidence(repo.npm_registry_check('demo'))
+            self.assertNotIn('fake-secret', json.dumps(result))
+            self.assertNotIn('stdout', result)
+
+    def test_repository_links_compare_transport_without_guessing_other_paths(self):
+        expected = repo.repository_identity('https://github.com/Fixture/Current')
+        for value in ('git@github.com:fixture/current.git', 'ssh://git@github.com/fixture/current.git',
+                      'github:fixture/current', 'fixture/current', {'url': 'git+https://github.com/fixture/current.git'}):
+            with self.subTest(value=value):
+                self.assertEqual(repo.repository_identity(value), expected)
+        self.assertNotEqual(repo.repository_identity('https://example.com/Fixture/Current'),
+                            repo.repository_identity('https://example.com/fixture/current'))
+        self.assertIsNone(repo.repository_identity('https://github.com/fixture/current/tree/main'))
+        self.assertIsNone(repo.repository_identity('https://github.com/fixture/current?different=1'))
+
+    def test_alternative_npm_registry_is_not_automatically_a_publication_defect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'package.json').write_text(json.dumps({
+                'name': 'demo', 'publishConfig': {'registry': 'https://registry.example/internal'}}))
+            _, payload, run, _ = self.run_main(root)
+            self.assertEqual(payload['registry']['npm'], {})
+            self.assertFalse(any(call.args[0][0] == 'npm' for call in run.call_args_list))
+
+    def test_optional_metadata_does_not_block_source_distribution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'README.md').write_text('# Fixture\nUse the source; support: https://example.com/help')
+            (root / 'LICENSE').write_text('MIT')
+            project = root / 'project.yaml'
+            project.write_text('discoverability:\n  description: A source collection\n'
+                               '  primary_keyword: useful references\n  topics:\n    - references\n'
+                               '  social_image_set: false\n')
+            code, payload, _, _ = self.run_main(root, '--project-yaml', str(project))
+            self.assertEqual(code, 0)
+            self.assertEqual(payload['errors'], [])
+            self.assertEqual(payload['shipwise']['checks']['topics_count']['status'], 'ok')
+            self.assertTrue(any(f['id'] == 'repo.shipwise.social_image_set' and
+                                f['status'] == 'unknown' and f['severity'] == 'low'
+                                for f in payload['findings']))
+            self.assertTrue(all(f['status'] != 'fail' for f in payload['findings']))
+
+    def test_registry_relationship_is_visible_in_findings_from_current_repo_identity(self):
+        for declared, matches in [('https://github.com/fixture/other', False), (None, None),
+                                  ('https://github.com/fixture/current.git', True)]:
+            with self.subTest(declared=declared), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / 'package.json').write_text('{"name":"demo","version":"1.0.0"}')
+                def command(args, **kwargs):
+                    if args[:3] == ['gh', 'repo', 'view']:
+                        return {'status': 'ok', 'stdout': '{"nameWithOwner":"fixture/current"}'}
+                    if args[0] == 'npm':
+                        return {'status': 'ok', 'stdout': json.dumps({
+                            'name': 'demo', 'version': '1.0.0', 'repository': declared})}
+                    return {'status': 'skipped'}
+                code, payload, _, _ = self.run_main(root, command=command)
+                self.assertEqual(code, 0)
+                self.assertIs(payload['registry']['npm']['demo']['repository_matches'], matches)
+                finding = next(f for f in payload['findings'] if f['id'] == 'repo.registry.npm.demo')
+                self.assertEqual(finding['status'], 'pass' if matches else 'unknown')
+                self.assertNotEqual(finding['status'], 'fail')
+
+    def test_support_doc_alone_is_a_candidate_and_never_proof_of_usability(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'README.md').write_text('# Fixture')
+            (root / 'LICENSE').write_text('MIT')
+            (root / 'SUPPORT.md').write_text('Contact the maintainers via the documented route.')
+            project = root / 'project.yaml'
+            project.write_text('discoverability:\n  description: Fixture\n')
+            code, payload, _, _ = self.run_main(root, '--project-yaml', str(project))
+            self.assertEqual(code, 0)
+            self.assertEqual(payload['shipwise']['checks']['support_path']['status'], 'ok')
+            finding = next(f for f in payload['findings'] if f['id'] == 'repo.shipwise.support_path')
+            self.assertEqual(finding['status'], 'unknown')
+
+    def test_topic_maximum_still_fails_but_small_topic_sets_do_not(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'README.md').write_text('# Fixture')
+            (root / 'LICENSE').write_text('MIT')
+            project = root / 'project.yaml'
+            for count in (0, 1, 4, 20, 21):
+                project.write_text('discoverability:\n  topics:\n' +
+                                   ''.join(f'    - topic-{i}\n' for i in range(count)))
+                code, payload, _, _ = self.run_main(root, '--project-yaml', str(project))
+                self.assertEqual(code, 1 if count > 20 else 0)
+                self.assertEqual(bool(payload['errors']), count > 20)
+
+    @unittest.skipUnless(shutil.which('cargo'), 'Cargo is needed for real workspace collection')
+    def test_real_virtual_workspace_inheritance_without_lockfile_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / 'Cargo.toml').write_text('[workspace]\nmembers = ["crates/*"]\n'
+                                           'exclude = ["crates/excluded"]\nresolver = "2"\n'
+                                           '[workspace.package]\nversion = "1.2.3"\n'
+                                           'homepage = "https://site.example/project"\n'
+                                           'repository = "https://github.com/fixture/current"\n')
+            for name in ('member', 'excluded'):
+                path = root / 'crates' / name
+                (path / 'src').mkdir(parents=True)
+                (path / 'src/lib.rs').write_text('')
+                (path / 'Cargo.toml').write_text('[package]\nname = "' + name + '"\n'
+                                               'version.workspace = true\nhomepage.workspace = true\n'
+                                               'repository.workspace = true\n')
+            before = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+            manifests = repo.collect_manifests(root)
+            after = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+            self.assertEqual(manifests['errors'], [])
+            self.assertEqual([p['name'] for p in manifests['cargo_members']], ['member'])
+            self.assertEqual(manifests['cargo_members'][0]['version'], '1.2.3')
+            self.assertEqual(manifests['cargo_members'][0]['homepage'], 'https://site.example/project')
+            self.assertEqual(before, after)
 
 
 if __name__ == '__main__':

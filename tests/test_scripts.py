@@ -409,7 +409,7 @@ class RepoSeoBaselineTests(unittest.TestCase):
                     self.assertEqual(len(payload["errors"]), 2)
                     self.assertTrue(all("tomllib unavailable" in item["reason"] for item in payload["errors"]))
 
-    def test_issue_template_file_emits_json_and_fails_shipwise_gate(self) -> None:
+    def test_issue_template_file_emits_json_as_optional_shipwise_improvement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             for name in ["README.md", "LICENSE", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SECURITY.md"]:
@@ -437,16 +437,15 @@ class RepoSeoBaselineTests(unittest.TestCase):
             )
             result = self.run_script("--root", tmp, "--project-yaml", str(project_yaml), "--json")
 
-            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.returncode, 0)
             self.assertEqual(result.stderr, "")
             payload = json.loads(result.stdout)
             self.assertFalse(payload["community_files"]["issue_templates"])
             self.assertFalse(payload["shipwise"]["community_files"]["issue_templates"])
-            self.assertEqual(payload["status"], "error")
-            self.assertEqual(
-                {item["check"] for item in payload["errors"]}, {"issue_templates", "support_path"}
-            )
-            self.assertTrue(all(item["surface"] == "shipwise" for item in payload["errors"]))
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["errors"], [])
+            self.assertEqual(payload["shipwise"]["checks"]["issue_templates"]["severity"], "warning")
+            self.assertEqual(payload["shipwise"]["checks"]["support_path"]["status"], "ok")
 
             issue_templates.unlink()
             passing = self.run_script("--root", tmp, "--json")
@@ -472,7 +471,7 @@ class RepoSeoBaselineTests(unittest.TestCase):
                 self.assertEqual(payload["community_files"]["issue_templates"], expected)
                 self.assertEqual(payload["errors"], [])
 
-    def test_shipwise_project_yaml_gate_returns_errors(self) -> None:
+    def test_shipwise_default_social_preview_is_an_improvement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "README.md").write_text("# Demo\n", encoding="utf-8")
@@ -502,10 +501,11 @@ discoverability:
 
             result = self.run_script("--root", str(root), "--project-yaml", str(project_yaml), "--json")
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 0)
         payload = json.loads(result.stdout)
-        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["shipwise"]["checks"]["social_image_set"]["status"], "error")
+        self.assertEqual(payload["shipwise"]["checks"]["social_image_set"]["severity"], "warning")
 
     def test_shipwise_gate_checks_keyword_topics_and_complete_community_files(self) -> None:
         module = load_script("repo_seo_baseline.py")
@@ -866,9 +866,10 @@ discoverability:
                         result = self.run_script(
                             "--root", str(root), "--project-yaml", str(project_yaml), "--json"
                         )
-                        self.assertEqual(result.returncode, 1, result.stderr)
+                        self.assertEqual(result.returncode, 0, result.stderr)
                         check = json.loads(result.stdout)["shipwise"]["checks"][field]
                         self.assertEqual(check["reason"], f"missing discoverability.{field}")
+                        self.assertEqual(check["severity"], "warning")
 
     def test_shipwise_gate_rejects_duplicate_topics_and_each_missing_community_file(self) -> None:
         module = load_script("repo_seo_baseline.py")

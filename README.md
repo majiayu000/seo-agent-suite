@@ -334,11 +334,31 @@ sitemap is absent. A robots 404/410 is reported as `not_configured` and does
 not by itself fail the repository audit. Community paths and issue-template
 candidates are local evidence; template usability still requires review.
 Automatic registry queries skip private npm packages and Cargo packages that
-cannot publish to crates.io. Workspace metadata is collected with
+cannot publish to crates.io, and do not query public npm for manifests targeting
+another registry. Explicit `--npm`/`--crate` queries remain available.
+Workspace metadata is collected with
 `--locked --offline`; unavailable dependencies or metadata are reported rather
 than modifying the audited project's lockfile. Crate identity and published
 version come from the crates.io API, with local version differences kept
-separate from fetch success.
+separate from fetch success. npm responses must also identify the exact package.
+For both registries, `repository_matches` compares the package's declared
+repository with the audited GitHub repository or origin remote: `true` is a
+matching source URL, `false` is a different declared repository, and `null` means
+the relationship cannot be established. Findings retain unverified associations.
+This does not authenticate publishers, inspect artifacts or prove installation;
+a same-name package or latest version alone is not this project's publication.
+Private/source-only distribution can be not applicable, without a requirement
+to publish a package.
+
+Shipwise checks keep their observed `ok`/`error` status. Optional metadata,
+exact keyword wording, custom social images (P2), and community-file completeness
+carry `severity: warning`; they do not enter top-level `errors` or fail the command.
+Topics have a maximum of 20 and no minimum. Invalid declared values, missing
+README/license candidates and acquisition errors retain the existing error path.
+Support candidates may be a template, contributing guide or SUPPORT file, and
+README/external links may suffice; every candidate still needs a real usability
+check. Legal access/install, quickstart, product proof and reachable support are
+launch priorities that this file-presence audit alone cannot verify.
 
 Local scripts require no SEO-provider API keys, but repository checks can call
 installed tools and public URLs. They do not connect Search Console or keyword

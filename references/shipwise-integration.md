@@ -64,14 +64,31 @@ python3 scripts/repo_seo_baseline.py \
   --json
 ```
 
-The script validates the declared `discoverability:` block plus local
-community-file evidence: description/primary-keyword alignment, keyword list,
-GitHub topic count/format/uniqueness, homepage URL, social preview state,
-README, license, contributing guide, code of conduct, security policy, and
-issue templates. Failures are emitted in the top-level `errors` array and
-return a non-zero exit code, so CI and launch-readiness gates can fail closed.
+The script records the declared `discoverability:` block and local community
+file candidates. Invalid declared types, malformed topic/keyword values, the
+20-topic maximum, URL credentials and missing README/license candidates retain
+top-level `errors` and a non-zero exit code. Topics have no minimum.
+
+Optional description/keyword wording, an absent project homepage, custom social
+images (P2), and community-file completeness carry `severity: warning` on the
+existing `checks` entries. An observed `status: error` there means that the
+optional check was not satisfied; it does not fail the command or launch gate.
+The report's `findings[]` records these as review items with `status: unknown`.
+Support needs one usable route, not both issue templates and CONTRIBUTING; a
+SUPPORT file, README link or external service may suffice. Local candidate
+presence cannot verify reachable support, legal installation, quickstart or
+product proof; check those P0 outcomes directly before declaring readiness.
+
+Registry findings distinguish exact package identity from the declared source
+repository relationship. A different or absent repository link is unverified,
+not evidence of abuse, ownership or a requirement to publish. Private packages,
+alternative registries and source-only distribution may be not applicable.
 
 This is a local contract gate, not proof of the complete Shipwise checklist. It
 does not prove live GitHub metadata, release state, indexing, rankings, or
 search visibility; collect those surfaces separately with their current data
 sources.
+
+Link this dated, revision-scoped report from the existing `proof.md` evidence
+index. Record source merge, exact registry version/artifact, GitHub Release,
+deployed site and engine indexing separately: none proves any of the others.
